@@ -15,7 +15,7 @@ cotop works on top of the official [Colab CLI](https://pypi.org/project/google-c
 ## Install
 
 ```sh
-uv tool install git+https://github.com/benngarcia/cotop
+uv tool install cotop
 cotop
 ```
 
