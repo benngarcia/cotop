@@ -1,0 +1,44 @@
+[project]
+name = "cotop"
+version = "0.1.0"
+description = "A top-like terminal dashboard for Google Colab runtimes and compute units"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.12"
+keywords = ["colab", "google-colab", "tui", "dashboard", "gpu", "textual"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Monitoring",
+]
+dependencies = [
+    # cotop reads the CLI's internals (auth, session file, client), so it pins the minor version.
+    "google-colab-cli~=0.8.0",
+    "packaging",
+    "requests",
+    "textual>=6",
+]
+
+[project.urls]
+Homepage = "https://github.com/benngarcia/cotop"
+Issues = "https://github.com/benngarcia/cotop/issues"
+
+[project.scripts]
+cotop = "cotop.app:main"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

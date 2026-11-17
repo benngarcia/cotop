@@ -1,0 +1,2 @@
+)]}'
+{"memory": {"totalBytes": 190000000000, "freeBytes": 180000000000}, "disks": [{"filesystem": {"label": "kernel", "totalBytes": 250000000000, "usedBytes": 65000000000}}], "gpus": [{"name": "NVIDIA RTX PRO 6000 Blackwell Server Edition", "memoryUsedBytes": 90000000000, "memoryTotalBytes": 100000000000, "gpuUtilization": 1.0, "memoryUtilization": 0.9, "everUsed": true}]}

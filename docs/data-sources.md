@@ -1,0 +1,59 @@
+# Where cotop's numbers come from
+
+cotop polls the account, the runtime list and each runtime's kernels every 15
+seconds, and each runtime's resources every 2 seconds for the graphs. Every
+request is a GET.
+
+| Panel | Source | Notes |
+|---|---|---|
+| Account email | `openidconnect.googleapis.com/v1/userinfo` | Signed in with the Colab CLI's OAuth token from the OS keyring |
+| Balance, rate, eligible hardware | `colab.research.google.com/tun/m/ccu-info` | The same call as `colab usage`. The CLI drops `eligibleGpus` and `eligibleTpus`; cotop reads the raw body |
+| Runtimes | `/tun/m/assignments` | Every VM the account holds, including ones opened in a browser. These show as *untracked* |
+| Runtime names, running command | `~/.config/colab-cli/sessions.json` | Read under the CLI's file lock and joined on `endpoint`. cotop never prunes or rewrites this file, which `colab sessions` and `colab status` do |
+| Kernel state, idle time, clients | Runtime proxy `/api/kernels`, `/api/status` | Requests carry `?no_track_activity=1` |
+| GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. A read that fails or takes over 3 s is a gap in the graph, never a zero |
+| Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Only event types, times and file names are shown. Code, outputs and stdin replies are never shown |
+
+## Estimates
+
+Colab reports only the account's total hourly rate, never a per-runtime rate.
+The `CU/hr` column is therefore:
+
+- **exact** when there is one runtime;
+- **≈ split** when every runtime is the same hardware: total ÷ count;
+- **≈ learned** from `~/.cache/cotop/rates.json`, which records each hardware kind's rate
+  whenever only that kind is running;
+- **?** otherwise.
+
+Colab boots VMs before it assigns them. One G4 runtime booted 21 minutes
+before `colab new` received it. Uptime and spend therefore count from the
+assignment time in the CLI history. For a runtime the CLI did not start,
+the VM's boot time is the only start time available. That figure is an upper
+bound, shown as `≤`.
+
+Colab settles the balance in steps a few minutes apart, so a sample taken
+every 15 seconds shows no change for minutes at a time. "Charged last hour" is
+the fall in balance between the first and last settled step in the past hour,
+logged in `~/.cache/cotop/usage.jsonl`. You can compare it with the rate
+Colab reports.
+
+## Not verified
+
+- Whether reading a runtime's Jupyter API delays Colab's idle shutdown. Requests
+  send `no_track_activity=1`, including the reads every 2 seconds. Colab's own
+  idle signal is not documented.
+- That billing starts at assignment rather than at VM boot.
+
+## Actions
+
+| Key | Runs | Notes |
+|---|---|---|
+| `s` | `colab stop -s NAME` | For an untracked runtime, the CLI's `Client.unassign(endpoint)`, because no name exists |
+| `k` | `colab restart-kernel -s NAME` | Only for runtimes the CLI started |
+| `x` | `colab ssh -s NAME [-i KEY]` | The dashboard suspends while the shell runs. A failed connection waits for Enter so its error stays readable |
+
+The CLI resolves names, not endpoints. Before a named action, cotop reads
+the assignments and the session file again. It acts only if the name still
+points at the same live VM. A name that was reused since the last poll would
+otherwise point at another VM. `colab ssh` also creates a new runtime for a
+name it does not know.

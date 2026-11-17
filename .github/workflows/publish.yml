@@ -1,0 +1,21 @@
+# Publishes to PyPI when a version tag is pushed, with PyPI trusted publishing:
+# PyPI trusts this workflow's GitHub identity, so no token is stored anywhere.
+name: Publish
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  pypi:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write  # the OIDC token PyPI checks
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Tag matches the package version
+        run: test "v$(uv version --short)" = "${GITHUB_REF_NAME}"
+      - run: uv build
+      - run: uv publish
