@@ -303,6 +303,9 @@ def test_history_skips_lines_it_cannot_read(tmp_path):
         + b'{"timestamp": "2026-11-17T21:00:00", "event_type": "execution"}\n'  # no time zone
         + b'{"timestamp": "2026-11-17T21:01:00+00:00", "event_type": "session_created"}\n'  # no endpoint
         + b'{"timestamp": "2026-11-17T21:02:00+00:00", "event_type": 7}\n'
+        + b'{"timestamp": 1763413380, "event_type": "execution"}\n'
+        + b'{"timestamp": "2026-11-17T21:04:00+00:00", "event_type": "session_created", "endpoint": "f", "machine_shape": "STANDARD"}\n'
+        + b'{"timestamp": "2026-11-17T21:05:00+00:00", "event_type": "session_created", "endpoint": "g", "accelerator": "G4"}\n'
         + b'\xff\xfe{"timestamp": "2026-11-17T21:03:00+00:00", "event_ty'
     )
     h = History.load(tmp_path)
