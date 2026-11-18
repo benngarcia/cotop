@@ -133,7 +133,7 @@ async def test_kernel_and_ssh_actions_refuse_untracked_runtimes(isolated):
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
-        await pilot.press("k", "x")
+        await pilot.press("R", "x")
         await pilot.pause()
         assert colab.calls == [] and len(app._notifications) == 2
         assert app.screen is app.screen_stack[0]
@@ -290,3 +290,21 @@ def balance_is_red(app) -> bool:
     span = next(s for s in text.spans if text.plain[s.start:s.end].startswith("5,227"))
     color = Style.parse(str(span.style)).color
     return color is not None and color.get_truecolor() == RichColor.parse(RED).get_truecolor()
+
+
+async def test_vim_keys_move_and_restart_needs_shift_r(isolated):
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        table = app.query_one(Runtimes)
+        await pilot.press("j")
+        assert table.cursor_row == 1
+        await pilot.press("k")
+        assert table.cursor_row == 0 and app.screen is app.screen_stack[0]  # k moves; it no longer restarts
+        await pilot.press("R")
+        assert "Restart train's kernel?" in str(app.screen.query_one("Label").render())
+        await pilot.press("n", "question_mark")
+        assert app.screen.query("HelpPanel")
+        await pilot.press("question_mark")
+        assert not app.screen.query("HelpPanel")

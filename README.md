@@ -26,12 +26,13 @@ cotop needs Python 3.12 or later. It is tested on macOS and should work on Linux
 
 | Key | Action |
 |---|---|
-| `↑` `↓` | Select a runtime |
+| `↑` `↓` or `k` `j` | Select a runtime |
 | `h` | Past sessions and the hardware your account can use |
 | `r` | Refresh now (cotop also refreshes every 15 seconds) |
 | `s` | Stop the selected runtime |
-| `k` | Restart its kernel |
+| `R` | Restart its kernel |
 | `x` | Open a shell on it with `colab ssh` |
+| `?` | Show every key |
 | `q` | Quit |
 
 ![The stop confirmation, with Cancel selected](docs/images/stop.png)

@@ -229,6 +229,10 @@ class Runtimes(DataTable):
     """The list to pick from, most expensive first; the GPU column moves every two seconds."""
 
     COLUMNS = ("Name", "Hardware", "GPU", "CU/hr", "Spent", "State")
+    BINDINGS = [
+        Binding("j", "cursor_down", "Down", show=False),
+        Binding("k", "cursor_up", "Up", show=False),
+    ]
     WIDE = 100  # below this many columns "Up" is dropped; the panel still shows it
 
     def on_mount(self) -> None:
@@ -404,9 +408,10 @@ class Dashboard(App):
     BINDINGS = [
         ("r", "refresh", "Refresh"),
         ("s", "stop", "Stop"),
-        ("k", "restart_kernel", "Restart kernel"),
+        ("R", "restart_kernel", "Restart kernel"),
         ("x", "ssh", "SSH"),
         ("h", "history", "History"),
+        Binding("question_mark", "keys", "Keys"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -550,6 +555,13 @@ class Dashboard(App):
         if action in {"stop", "restart_kernel", "ssh", "history"} and self.screen is not self.screen_stack[0]:
             return False
         return True
+
+    def action_keys(self) -> None:
+        """Toggle Textual's panel of every key that works here."""
+        if self.screen.query("HelpPanel"):
+            self.action_hide_help_panel()
+        else:
+            self.action_show_help_panel()
 
     def action_history(self) -> None:
         if self.snapshot:
