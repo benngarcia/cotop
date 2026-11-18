@@ -410,10 +410,8 @@ class History:
 
     @classmethod
     def load(cls, directory: Path) -> History:
-        events = {}
-        for f in directory.glob("*.jsonl"):
-            events[f.stem] = [json.loads(l) for l in f.read_text().splitlines() if l.strip()]
-        return cls(events)
+        """Lines cotop can't read are skipped: the CLI may be halfway through writing the last one."""
+        return cls({f.stem: [e for l in f.read_text(errors="replace").splitlines() if (e := _event(l))] for f in directory.glob("*.jsonl")})
 
     def assigned_at(self) -> dict[str, datetime]:
         """When the CLI was handed each endpoint."""
@@ -451,6 +449,20 @@ class History:
                     sessions.append(_past(name, created, e))
                     created = None
         return sorted(sessions, key=lambda s: s.created, reverse=True)
+
+
+EVENT_FIELDS = {"session_created": {"endpoint", "accelerator", "machine_shape"}}  # what History reads beyond the type and time
+
+
+def _event(line: str) -> dict | None:
+    """One history line, if it is an event with the fields History reads."""
+    try:
+        e = json.loads(line)
+        if isinstance(e["event_type"], str) and parse_time(e["timestamp"]).tzinfo and EVENT_FIELDS.get(e["event_type"], set()) <= e.keys():
+            return e
+    except (ValueError, TypeError, KeyError, AttributeError):
+        pass
+    return None
 
 
 def _past(name: str, created: dict, ended: dict | None) -> PastSession:

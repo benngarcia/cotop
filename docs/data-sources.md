@@ -68,7 +68,7 @@ idle activity.
 | Key | Runs | Notes |
 |---|---|---|
 | `s` | `colab stop -s NAME` | For an untracked runtime, the CLI's `Client.unassign(endpoint)`, because no name exists |
-| `k` | `colab restart-kernel -s NAME` | Only for runtimes the CLI started |
+| `R` | `colab restart-kernel -s NAME` | Only for runtimes the CLI started |
 | `x` | `colab ssh -s NAME [-i KEY]` | The dashboard suspends while the shell runs. A failed connection waits for Enter so its error stays readable |
 
 The CLI resolves names, not endpoints. Before a named action, cotop reads
