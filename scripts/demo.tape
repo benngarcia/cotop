@@ -1,5 +1,6 @@
 # Records docs/images/demo.gif from `cotop --demo`; nothing here touches a Colab account.
-#   vhs scripts/demo.tape
+# Run from the repo root: vhs scripts/demo.tape (it syncs the environment itself,
+# and fails without writing the GIF if cotop doesn't start).
 Output docs/images/demo.gif
 Set Shell "bash"
 Set FontSize 15
@@ -10,8 +11,11 @@ Set Framerate 12
 Set TypingSpeed 0
 
 Hide
-Type "export PS1='$ ' && clear && .venv/bin/cotop --demo" Enter
-Sleep 4s
+Type "export PS1='$ ' && uv sync -q && clear && echo synced" Enter
+Wait+Screen@180s /^synced/
+Type "uv run --no-sync cotop --demo" Enter
+Wait+Screen@30s /compute units left/
+Sleep 1s
 Show
 Sleep 3s
 Type "j" Sleep 1.2s
