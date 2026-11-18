@@ -41,19 +41,27 @@ the fall in balance between the first and last settled step in the past hour,
 logged in `~/.cache/cotop/usage.jsonl`. You can compare it with the rate
 Colab reports.
 
-## Watching does not keep idle runtimes alive
+## Watching did not keep an idle runtime alive
 
-Tested on 2026-11-17 with two idle CPU runtimes started with `colab new`. One
-was read every 2 seconds exactly as cotop reads it, and the other was never
-touched. Colab reclaimed both in the same one-minute check, 3 hours 1 minute
-after they started. The read requests carry `no_track_activity=1`. Jupyter
-honors it: the runtime's `last_activity` did not move after flagged reads, and
-did move after the same reads without the flag.
+Tested on 2026-11-17 with two idle CPU runtimes started with `colab new`, neither
+with a kernel. One was read the way cotop reads a runtime: the same endpoints
+and flag, its resources about every 2 seconds and its kernels about every 16 to
+20 seconds. The other was never touched. Colab reclaimed both in the same
+one-minute check, 3 hours 1 minute after they started.
+
+The read requests carry `no_track_activity=1`, and Jupyter honors it: the
+runtime's `last_activity` did not move after flagged reads, and did move after
+the same reads without the flag. Colab does not document what it counts as
+idle activity.
 
 ## Not verified
 
 - That billing starts at assignment rather than at VM boot.
-- The idle test above covered CPU runtimes only. GPU and TPU runtimes may follow different rules.
+- Whether Colab reclaimed these runtimes for being idle or at a fixed time
+  limit near 3 hours. The test had no runtime that stayed active, so it cannot
+  tell the two apart.
+- Runtimes with an idle kernel, and GPU or TPU runtimes. The test covered CPU
+  runtimes without a kernel only.
 
 ## Actions
 
