@@ -1,5 +1,6 @@
 # Publishes to PyPI when a version tag is pushed, with PyPI trusted publishing:
 # PyPI trusts this workflow's GitHub identity, so no token is stored anywhere.
+# To release, set version in pyproject.toml and push a matching v* tag, such as v0.3.1.
 name: Publish
 
 on:
