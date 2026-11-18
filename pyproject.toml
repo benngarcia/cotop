@@ -3,7 +3,7 @@ name = "cotop"
 version = "0.3.0"
 description = "A top-like terminal dashboard for Google Colab runtimes and compute units"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.12"
 keywords = ["colab", "google-colab", "tui", "dashboard", "gpu", "textual"]
