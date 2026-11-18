@@ -3,7 +3,7 @@
 cotop runs with your Colab CLI sign-in, so a bug in it could expose that token
 or act on a runtime you didn't choose. The README's
 [guarantees](README.md#guarantees) say what cotop's code holds to, each with the
-test that enforces it.
+test on `main` that checks it.
 
 ## Scope
 
