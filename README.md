@@ -2,10 +2,10 @@
 
 `top` for Google Colab: compute units, runtimes and what they cost, live in your terminal.
 
-![cotop showing the account, three runtimes and a live GPU graph for the selected one](docs/images/dashboard.png)
+![cotop's demo account: twelve runtimes sorted by cost, compute units in red because they run out today, and a live GPU graph for the selected H100](docs/images/dashboard.png)
 
-- **Your account:** compute units left, the hourly rate, when you run out, and the rate over the last day.
-- **Runtimes:** every VM on your account, including ones opened in a browser, with a live GPU sparkline, rate, spend, uptime and state. A runtime idle while it bills, out of RAM or disk, or unreachable says so in its row.
+- **Your account:** compute units left, the hourly rate, when you run out, and the rate over the last day. Compute units left turn red when they run out within a day.
+- **Runtimes:** every VM on your account, most expensive first, including ones opened in a browser, with a live GPU sparkline, rate, spend, uptime and state. A runtime idle while it bills, out of RAM or disk, or unreachable says so in its row.
 - **The selected runtime:** a braille graph of GPU utilization, read every two seconds, with VRAM, RAM and disk meters, what it has cost and its recent activity. On a runtime without a GPU, the graph shows RAM.
 - **History:** press `h` for past sessions, how long each ran and roughly what it cost.
 - **Actions:** stop a runtime, restart its kernel, or open a shell on it.
@@ -17,6 +17,7 @@ cotop works on top of the official [Colab CLI](https://pypi.org/project/google-c
 ```sh
 uv tool install cotop
 cotop
+cotop --demo   # a made-up account with twelve runtimes; no sign-in
 ```
 
 cotop needs Python 3.12 or later. It is tested on macOS and should work on Linux. If you have not signed in to the Colab CLI yet, cotop runs the same Google sign-in on first launch. On macOS, Keychain may ask once whether cotop's Python can read the Colab CLI's token.
@@ -66,7 +67,7 @@ cotop is an independent project. It relies on internal parts of `google-colab-cl
 ```sh
 uv sync
 uv run pytest
-uv run python scripts/screenshots.py OUT_DIR   # README screenshots, rendered from made-up data
+uv run python scripts/screenshots.py OUT_DIR   # README screenshots, rendered from the demo account
 ```
 
 To release, set `version` in `pyproject.toml`, then push a matching tag such as `v0.1.0`. The [publish workflow](.github/workflows/publish.yml) builds the package and uploads it to PyPI with trusted publishing.

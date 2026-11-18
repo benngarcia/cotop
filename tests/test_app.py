@@ -2,17 +2,27 @@
 
 import pytest
 
-import cotop.app as app_module
 from cotop.app import Dashboard, RuntimePanel, Runtimes
-from cotop.model import utc_now
+from rich.color import Color as RichColor
+from rich.style import Style
+
+from cotop.widgets import RED
+from cotop.model import History, utc_now
 from tests.test_model import CPU, G4, LOCAL, T4, ccu, resources, status
 
 
 class StubColab:
     def __init__(self, assignments, status, readings, rate):
         self._assignments, self._status, self._readings, self._rate = assignments, status, readings, rate
+        self.local = LOCAL
         self.fail = False
         self.calls = []
+
+    def sessions(self):
+        return self.local
+
+    def history(self):
+        return History({})
 
     def email(self):
         return "me@example.com"
@@ -41,12 +51,9 @@ class StubColab:
 
 
 @pytest.fixture
-def isolated(tmp_path, monkeypatch):
-    monkeypatch.setattr(app_module, "CACHE", tmp_path / "cache")
-    monkeypatch.setattr(app_module, "CLI_HOME", tmp_path / "cli")
-    monkeypatch.setattr(app_module, "local_sessions", lambda: LOCAL)
-    (tmp_path / "cli" / "history").mkdir(parents=True)
-    return tmp_path
+def isolated(tmp_path):
+    """The cache dir for one test; nothing else is read from or written to disk."""
+    return tmp_path / "cache"
 
 
 async def settle(app, pilot):
@@ -69,15 +76,15 @@ def mixed():
 
 
 async def test_mixed_untracked_unreachable_and_idle(isolated):
-    app = Dashboard(mixed())
+    app = Dashboard(mixed(), isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         table = app.query_one(Runtimes)
         assert table.row_count == 3
-        states = [str(table.get_row_at(i)[6]) for i in range(3)]
+        states = [str(table.get_row_at(i)[5]) for i in range(3)]
         assert states[0].startswith("idle") and states[1] == "busy" and states[2] == "unreachable"
         assert [str(table.get_row_at(i)[3]) for i in range(3)] == ["?", "?", "?"]  # mixed: no rate known
-        assert not (isolated / "cache" / "rates.json").exists()
+        assert not (isolated / "rates.json").exists()
         panel = app.query_one(RuntimePanel)
         assert panel.border_title == "train  G4"
         await pilot.press("down")
@@ -87,7 +94,7 @@ async def test_mixed_untracked_unreachable_and_idle(isolated):
 
 async def test_failed_refresh_keeps_the_last_data(isolated):
     colab = mixed()
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         colab.fail = True
@@ -98,7 +105,7 @@ async def test_failed_refresh_keeps_the_last_data(isolated):
 
 
 async def test_no_runtimes(isolated):
-    app = Dashboard(StubColab([], {}, {}, rate=0))
+    app = Dashboard(StubColab([], {}, {}, rate=0), isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         assert "nothing running" in str(app.query_one("#usage-text").render())
@@ -107,7 +114,7 @@ async def test_no_runtimes(isolated):
 
 async def test_stop_needs_a_yes_and_acts_on_the_selected_runtime(isolated):
     colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         await pilot.press("s")
@@ -123,7 +130,7 @@ async def test_stop_needs_a_yes_and_acts_on_the_selected_runtime(isolated):
 
 async def test_kernel_and_ssh_actions_refuse_untracked_runtimes(isolated):
     colab = StubColab([T4], {T4["endpoint"]: status()}, {}, rate=1.84)
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         await pilot.press("k", "x")
@@ -133,7 +140,7 @@ async def test_kernel_and_ssh_actions_refuse_untracked_runtimes(isolated):
 
 
 async def test_history_screen_opens_and_closes(isolated):
-    app = Dashboard(mixed())
+    app = Dashboard(mixed(), isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         await pilot.press("h")
@@ -147,7 +154,7 @@ async def test_history_screen_opens_and_closes(isolated):
 async def test_selection_survives_the_runtime_list_changing(isolated):
     """A selection below row 0 must stay put, not flip between runtimes, when the list changes."""
     colab = mixed()
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         await pilot.press("down")  # T4, on row 1
@@ -166,7 +173,7 @@ async def test_selection_survives_the_runtime_list_changing(isolated):
 
 
 async def test_readings_arriving_while_the_selection_moves(isolated):
-    app = Dashboard(mixed())
+    app = Dashboard(mixed(), isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         for step in range(6):
@@ -190,7 +197,7 @@ async def empty_then_two(app, pilot, colab, empty_at_launch):
 @pytest.mark.parametrize("empty_at_launch", [True, False])
 async def test_arrows_move_the_selection_after_the_list_was_empty(isolated, empty_at_launch):
     colab = StubColab([] if empty_at_launch else [G4], {} if empty_at_launch else {G4["endpoint"]: status()}, {}, rate=0)
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await empty_then_two(app, pilot, colab, empty_at_launch)
         await pilot.press("down")
@@ -200,28 +207,29 @@ async def test_arrows_move_the_selection_after_the_list_was_empty(isolated, empt
         assert app.query_one(RuntimePanel).border_title == "untracked  T4"
 
 
-async def test_ssh_after_the_empty_state_targets_the_highlighted_row(isolated, monkeypatch):
+async def test_ssh_after_the_empty_state_targets_the_highlighted_row(isolated):
     """x is the one key with no confirmation, so it gets its own test."""
-    named = {**LOCAL, "eval": {"name": "eval", "endpoint": T4["endpoint"], "running": None}}
-    monkeypatch.setattr(app_module, "local_sessions", lambda: named)
     colab = StubColab([], {}, {}, rate=0)
+    colab.local = {**LOCAL, "eval": {"name": "eval", "endpoint": T4["endpoint"], "running": None}}
 
     def ssh_command(runtime):
         colab.calls.append(("ssh", runtime.endpoint))
         raise RuntimeError("stubbed: no shell in tests")
 
     colab.ssh_command = ssh_command
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await empty_then_two(app, pilot, colab, empty_at_launch=True)
+        table = app.query_one(Runtimes)
+        second = table.coordinate_to_cell_key((1, 0)).row_key.value
         await pilot.press("down", "x")
         await settle(app, pilot)
-        assert colab.calls == [("ssh", T4["endpoint"])]
+        assert colab.calls == [("ssh", second)]
 
 
 async def test_the_panel_follows_a_poll_without_a_cursor_move(isolated):
     colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         assert app.query_one(RuntimePanel).border_subtitle.startswith("busy")
@@ -231,20 +239,54 @@ async def test_the_panel_follows_a_poll_without_a_cursor_move(isolated):
         assert app.query_one(RuntimePanel).border_subtitle.startswith("idle")
 
 
-async def test_runtime_keys_do_nothing_on_the_history_screen(isolated, monkeypatch):
-    named = {**LOCAL, "eval": {"name": "eval", "endpoint": T4["endpoint"], "running": None}}
-    monkeypatch.setattr(app_module, "local_sessions", lambda: named)
+async def test_runtime_keys_do_nothing_on_the_history_screen(isolated):
     colab = mixed()
+    colab.local = {**LOCAL, "eval": {"name": "eval", "endpoint": T4["endpoint"], "running": None}}
 
     def ssh_command(runtime):
         colab.calls.append(("ssh", runtime.endpoint))
         raise RuntimeError("stubbed: no shell in tests")
 
     colab.ssh_command = ssh_command
-    app = Dashboard(colab)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         await pilot.press("h", "x", "s", "k")
         await settle(app, pilot)
         assert type(app.screen).__name__ == "HistoryScreen"
         assert colab.calls == []
+
+
+async def test_the_demo_runs_and_sorts_the_most_expensive_first(tmp_path):
+    from cotop.app import demo_dashboard
+
+    app = demo_dashboard(tmp_path)
+    async with app.run_test(size=(138, 40)) as pilot:
+        await settle(app, pilot)
+        table = app.query_one(Runtimes)
+        assert table.row_count == 12 and table.border_title == "Runtimes (12)"
+        rates = [float(str(table.get_row_at(i)[3]).lstrip("≈")) for i in range(table.row_count)]
+        assert rates == sorted(rates, reverse=True)
+        assert "Up" in table.columns
+        await pilot.resize_terminal(80, 24)
+        await settle(app, pilot)
+        assert "Up" not in table.columns  # too narrow: the panel still shows uptime
+
+
+async def test_compute_units_turn_red_when_they_last_under_a_day(isolated):
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        assert not balance_is_red(app)  # 5,227 left at 10.05 an hour lasts weeks
+        colab._rate = 300.0  # now it lasts under a day
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert balance_is_red(app)
+
+
+def balance_is_red(app) -> bool:
+    text = app.query_one("#usage-text").render()
+    span = next(s for s in text.spans if text.plain[s.start:s.end].startswith("5,227"))
+    color = Style.parse(str(span.style)).color
+    return color is not None and color.get_truecolor() == RichColor.parse(RED).get_truecolor()

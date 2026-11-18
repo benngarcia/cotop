@@ -19,7 +19,7 @@ from colab_cli.auth import get_credentials
 from colab_cli.client import Client, Prod
 from colab_cli.state import StateStore
 
-from cotop.model import Resources, Runtime, Status, parse_json, utc_now
+from cotop.model import History, Resources, Runtime, Status, parse_json, utc_now
 
 COLAB = "https://colab.research.google.com"
 USERINFO = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -80,8 +80,18 @@ class Colab:
         the last poll would point the action at another VM, and `colab ssh`
         creates a new runtime for a name it does not know.
         """
-        if not still_assigned(runtime, self.assignments(), local_sessions()):
+        if not still_assigned(runtime, self.assignments(), self.sessions()):
             raise RuntimeGone(f"{runtime.name or runtime.endpoint} is no longer this runtime; refresh and retry")
+
+    def sessions(self) -> dict[str, dict]:
+        """The CLI's named sessions, without their tokens, read under the CLI's own lock."""
+        return {
+            name: {"name": s.name, "endpoint": s.endpoint, "running": s.running}
+            for name, s in StateStore().list().items()
+        }
+
+    def history(self) -> History:
+        return History.load(CLI_HOME / "history")
 
     def status(self, assignments: list[dict]) -> dict[str, Status | Exception]:
         with ThreadPoolExecutor(max_workers=8) as pool:
@@ -148,11 +158,3 @@ def _runtime_resources(runtime: Runtime) -> Resources | None:
         return Resources.parse(utc_now(), _proxy_get(runtime.url, runtime.token, "/api/colab/resources", RESOURCES_TIMEOUT))
     except Exception:  # a gap in the graph; the slow loop reports an unreachable runtime
         return None
-
-
-def local_sessions() -> dict[str, dict]:
-    """The CLI's named sessions, without their tokens."""
-    return {
-        name: {"name": s.name, "endpoint": s.endpoint, "running": s.running}
-        for name, s in StateStore().list().items()
-    }
