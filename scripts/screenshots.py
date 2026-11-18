@@ -1,4 +1,5 @@
-"""Render the README screenshots from the demo account; no Colab account is touched.
+"""Render the README screenshots from the demo account; no Colab account is touched. The GIF comes from
+scripts/demo.tape: `vhs scripts/demo.tape`.
 
     uv run python scripts/screenshots.py OUT_DIR
 
