@@ -52,12 +52,22 @@ Estimates start with `≈`, and upper bounds start with `≤`. Colab boots VMs b
 
 [docs/data-sources.md](docs/data-sources.md) lists each request cotop makes and what it reads.
 
-## Privacy
+## What cotop can touch
 
-- cotop sends requests only to Google: Colab, and the account endpoint that supplies your email address.
-- It keeps its own files in `~/.cache/cotop`: learned rates, and balance and rate samples.
-- It never shows or stores tokens.
-- From the CLI's history it shows only event types, times and file names. It never shows code, outputs or anything typed at a prompt.
+| | What | When |
+|---|---|---|
+| Reads | Your Colab CLI sign-in, through the CLI's own `get_credentials`. If the token has expired, the CLI refreshes it and saves it back to the OS keyring. If there is no token, the CLI asks you to sign in | At start |
+| Reads | `~/.config/colab-cli/sessions.json` (under the CLI's lock) and `~/.config/colab-cli/history/*.jsonl` | Every 15 s |
+| Sends GET | `colab.research.google.com` (balance, runtime list), Google's userinfo endpoint (your email address), and each runtime's proxy (kernels, status, resources) | Every 15 s; resources every 2 s |
+| Writes | `~/.cache/cotop/rates.json` and `~/.cache/cotop/usage.jsonl`, and nothing else | When a rate or the balance changes |
+| Runs | `colab stop -s NAME` or `colab restart-kernel -s NAME` | After you press `s` or `R` and then confirm |
+| Sends POST | The CLI client's `unassign`, for a runtime the CLI didn't start | After you press `s` and then confirm |
+| Runs | `colab ssh -s NAME [-i KEY]` in your terminal | When you press `x` |
+
+- cotop sends requests only to Google, and never shows or stores a token.
+- From the CLI's history it shows only event types, times and file names: never code, outputs or anything typed at a prompt.
+- Before it runs a CLI command on a name, cotop checks that the name still points at the same runtime.
+- `cotop --demo` touches none of the above: it sends no requests and keeps its cache in a temporary directory.
 
 ## Not affiliated with Google
 

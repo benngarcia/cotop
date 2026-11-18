@@ -296,7 +296,7 @@ dev = [
 requires-dist = [
     { name = "google-colab-cli", specifier = "~=0.8.0" },
     { name = "requests" },
-    { name = "textual", specifier = ">=6" },
+    { name = "textual", specifier = ">=6,<9" },
 ]
 
 [package.metadata.requires-dev]
