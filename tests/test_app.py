@@ -308,3 +308,103 @@ async def test_vim_keys_move_and_restart_needs_shift_r(isolated):
         assert app.screen.query("HelpPanel")
         await pilot.press("question_mark")
         assert not app.screen.query("HelpPanel")
+
+
+async def test_a_failed_ssh_refreshes_like_any_other_action(isolated):
+    """x on a stale name fails, and the list must not stay stale until the next tick."""
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=11.89)
+    polls = []
+    assignments = colab.assignments
+    colab.assignments = lambda: polls.append(1) or assignments()
+
+    def ssh_command(runtime):
+        raise RuntimeError("train is no longer this runtime; refresh and retry")
+
+    colab.ssh_command = ssh_command
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        before = len(polls)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert len(polls) == before + 1
+
+
+async def test_the_demo_connects_to_nothing_and_runs_nothing(tmp_path, monkeypatch):
+    import socket
+    import subprocess
+
+    from cotop.app import demo_dashboard
+
+    attempts = []
+    monkeypatch.setattr(socket.socket, "connect", lambda self, *a: attempts.append(("connect", a)))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: attempts.append(("run", a)))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: attempts.append(("popen", a)))
+    app = demo_dashboard(tmp_path)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("s", "y", "R", "y", "x", "h", "escape", "r")
+        await settle(app, pilot)
+    assert attempts == []
+
+
+async def test_ssh_runs_the_command_line_unchanged(isolated, monkeypatch):
+    import contextlib
+
+    import cotop.app
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=11.89)
+    expected = ["/venv/bin/colab", "ssh", "-s", "train"]
+    colab.ssh_command = lambda runtime: list(expected)  # a fresh list, so a change made in place shows
+    ran = []
+    monkeypatch.setattr(cotop.app.subprocess, "run", lambda a, **k: ran.append(list(a)) or type("Done", (), {"returncode": 0})())
+    app = Dashboard(colab, isolated)
+    monkeypatch.setattr(app, "suspend", contextlib.nullcontext)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("x")
+        await settle(app, pilot)
+    assert ran == [expected]
+
+
+async def test_a_refresh_asked_for_during_a_poll_runs_after_it(isolated):
+    """A stop that lands while a poll is reading must not wait for the next 15 s tick."""
+    import threading
+
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    gate, polls = threading.Event(), []
+    assignments = colab.assignments
+
+    def slow_assignments():
+        polls.append(1)
+        if len(polls) == 2:
+            gate.wait(5)  # the second poll is still reading when the stop finishes
+        return assignments()
+
+    colab.assignments = slow_assignments
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.action_refresh()  # poll 2, held at the gate
+        await pilot.pause()
+        await pilot.press("s", "y")  # its refresh arrives while poll 2 runs
+        await pilot.pause(0.3)
+        gate.set()
+        await settle(app, pilot)
+        assert len(polls) == 3
+        assert colab.calls == [("stop", G4["endpoint"])]
+
+
+def test_the_demo_signs_in_to_nothing_and_leaves_the_cache_alone(tmp_path, monkeypatch):
+    import cotop.app
+    import cotop.colab
+
+    home_cache = tmp_path / "home" / ".cache" / "cotop"
+    monkeypatch.setattr(cotop.app, "CACHE", home_cache)
+    monkeypatch.setattr(cotop.colab, "cli_sign_in", lambda: (_ for _ in ()).throw(AssertionError("signed in")))
+    used = []
+    monkeypatch.setattr(cotop.app.Dashboard, "run", lambda self: used.append(self))
+    cotop.app.run_demo()
+    [app] = used
+    assert home_cache not in (app.rates.path.parent, app.usage.path.parent)
+    assert not (tmp_path / "home").exists()
