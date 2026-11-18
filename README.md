@@ -2,7 +2,7 @@
 
 `top` for Google Colab: compute units, runtimes and what they cost, live in your terminal.
 
-![cotop's demo account: twelve runtimes sorted by cost, compute units in red because they run out today, and a live GPU graph for the selected H100](docs/images/dashboard.png)
+![cotop --demo: moving through twelve runtimes with j, each one's live GPU graph, the ? keys panel, past sessions with h, and the stop confirmation](docs/images/demo.gif)
 
 - **Your account:** compute units left, the hourly rate, when you run out, and the rate over the last day. Compute units left turn red when they run out within a day.
 - **Runtimes:** every VM on your account, most expensive first, including ones opened in a browser, with a live GPU sparkline, rate, spend, uptime and state. A runtime idle while it bills, out of RAM or disk, or unreachable says so in its row.
