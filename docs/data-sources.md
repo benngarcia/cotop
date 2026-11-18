@@ -1,9 +1,13 @@
 # Where cotop's numbers come from
 
-cotop polls the account, the runtime list and each runtime's kernels every 15
-seconds, and each runtime's resources every 2 seconds for the graphs. Watching
-sends only GET requests. Stop sends a POST: the colab CLI's own `colab stop`,
-or for a runtime the CLI didn't start, the CLI client's `unassign` call.
+cotop polls the account, the runtime list and each runtime's kernels at a
+15-second interval, on `r` and after each action, and each runtime's resources
+at a 2-second interval for the graphs. In this release those requests are GETs. The Colab
+CLI's signed-in session refreshes its access token with a POST when it expires.
+Stop sends a POST: the colab CLI's own `colab stop`, or for a runtime the CLI
+didn't start, the CLI client's `unassign` call. The README's
+[What cotop can touch](../README.md#what-cotop-can-touch) lists the guarantees
+and the calls cotop makes into the CLI.
 
 `cotop --demo` runs on `src/cotop/demo.py`, a made-up account, and sends no
 requests at all.
@@ -13,10 +17,10 @@ requests at all.
 | Account email | `openidconnect.googleapis.com/v1/userinfo` | Signed in with the Colab CLI's OAuth token from the OS keyring |
 | Balance, rate, eligible hardware | `colab.research.google.com/tun/m/ccu-info` | The same call as `colab usage`. The CLI drops `eligibleGpus` and `eligibleTpus`; cotop reads the raw body |
 | Runtimes | `/tun/m/assignments` | Every VM the account holds, including ones opened in a browser. These show as *untracked* |
-| Runtime names, running command | `~/.config/colab-cli/sessions.json` | Read under the CLI's file lock and joined on `endpoint`. cotop never prunes or rewrites this file, which `colab sessions` and `colab status` do |
+| Runtime names, running command | `~/.config/colab-cli/sessions.json` | Read under the CLI's file lock and joined on `endpoint`. `colab sessions` and `colab status` prune and rewrite this file, and `colab stop`, which cotop runs on `s`, updates it |
 | Kernel state, idle time, clients | Runtime proxy `/api/kernels`, `/api/status` | Requests carry `?no_track_activity=1` |
 | GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. A read that fails or takes over 3 s is a gap in the graph, never a zero |
-| Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Only event types, times and file names are shown. Code, outputs and stdin replies are never shown |
+| Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Code, outputs and prompt replies are not shown; see the README's guarantees |
 
 ## Estimates
 
