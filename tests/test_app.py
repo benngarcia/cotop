@@ -229,3 +229,22 @@ async def test_the_panel_follows_a_poll_without_a_cursor_move(isolated):
         await pilot.press("r")
         await settle(app, pilot)
         assert app.query_one(RuntimePanel).border_subtitle.startswith("idle")
+
+
+async def test_runtime_keys_do_nothing_on_the_history_screen(isolated, monkeypatch):
+    named = {**LOCAL, "eval": {"name": "eval", "endpoint": T4["endpoint"], "running": None}}
+    monkeypatch.setattr(app_module, "local_sessions", lambda: named)
+    colab = mixed()
+
+    def ssh_command(runtime):
+        colab.calls.append(("ssh", runtime.endpoint))
+        raise RuntimeError("stubbed: no shell in tests")
+
+    colab.ssh_command = ssh_command
+    app = Dashboard(colab)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("h", "x", "s", "k")
+        await settle(app, pilot)
+        assert type(app.screen).__name__ == "HistoryScreen"
+        assert colab.calls == []

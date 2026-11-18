@@ -7,6 +7,8 @@ single place that knows the wire format (XSSI prefix, camelCase, fractions).
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -23,6 +25,22 @@ def parse_json(body: str):
 
 def parse_time(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def write_atomic(path: Path, text: str) -> None:
+    """Replace path in one step, so a reader never sees half a file, even with two cotops running."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as f:
+        f.write(text)
+    os.replace(f.name, path)
+
+
+def read_cache(path: Path):
+    """A cache file's JSON, or None if it is missing or damaged; cotop rebuilds what it loses."""
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -266,7 +284,8 @@ class RateBook:
 
     def __init__(self, path: Path):
         self.path = path
-        self.rates: dict[str, float] = json.loads(path.read_text()) if path.exists() else {}
+        rates = read_cache(path)
+        self.rates: dict[str, float] = rates if isinstance(rates, dict) else {}
 
     def observe(self, account: Account, runtimes: list[Runtime]) -> None:
         kinds = {r.kind for r in runtimes}
@@ -278,8 +297,7 @@ class RateBook:
         kind = kinds.pop()
         if self.rates.get(kind) != rate:
             self.rates[kind] = rate
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(json.dumps(self.rates, indent=2, sort_keys=True))
+            write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
     def rate(self, runtime: Runtime, runtimes: list[Runtime], account: Account) -> Rate:
         if len(runtimes) == 1:
@@ -305,16 +323,18 @@ class UsageLog:
         self.samples: list[tuple[datetime, float, float]] = []
         if path.exists():
             for line in path.read_text().splitlines():
-                ts, balance, rate = json.loads(line)
-                self.samples.append((parse_time(ts), balance, rate))
+                try:
+                    ts, balance, rate = json.loads(line)
+                    self.samples.append((parse_time(ts), balance, rate))
+                except ValueError:  # a damaged line from an older cotop: skip it
+                    continue
 
     def record(self, now: datetime, balance: float, rate: float) -> None:
         if self.samples and self.samples[-1][1:] == (balance, rate):
             return
         self.samples.append((now, balance, rate))
         self.samples = [s for s in self.samples if now - s[0] <= self.KEEP]
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text("".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
+        write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
 
     def burn(self, now: datetime, window: timedelta = timedelta(hours=1)) -> float | None:
         """Compute units per hour actually charged within the window."""
