@@ -20,7 +20,6 @@ classifiers = [
 dependencies = [
     # cotop reads the CLI's internals (auth, session file, client), so it pins the minor version.
     "google-colab-cli~=0.8.0",
-    "packaging",
     "requests",
     "textual>=6",
 ]

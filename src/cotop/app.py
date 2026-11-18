@@ -523,6 +523,12 @@ class Dashboard(App):
         if r := self.named("ssh into"):
             self.open_ssh(r)
 
+    def check_action(self, action: str, parameters: tuple) -> bool | None:
+        """Runtime keys work only on the dashboard, where you can see the runtime they act on."""
+        if action in {"stop", "restart_kernel", "ssh", "history"} and self.screen is not self.screen_stack[0]:
+            return False
+        return True
+
     def action_history(self) -> None:
         if self.snapshot:
             self.push_screen(HistoryScreen(self.snapshot, self.rates))
