@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
@@ -19,7 +19,7 @@ from textual.theme import Theme
 from textual.widgets import Button, DataTable, Footer, Label, Static
 from textual.worker import Worker
 
-from cotop.colab import CLI_HOME, Colab, local_sessions
+from cotop.colab import Colab
 from cotop.model import (
     Account,
     History,
@@ -93,13 +93,14 @@ class Usage(Vertical):
         a, now = s.account, s.taken_at
         self.border_title = a.email
         runway = a.runway
-        left = Text.assemble((f"{a.balance:,.2f}", "bold"), " compute units left")
+        low = runway is not None and runway < LOW_RUNWAY
+        left = Text.assemble((f"{a.balance:,.2f}", f"bold {RED}" if low else "bold"), (" compute units left", RED if low else ""))
         if runway is None:
             pace = Text("nothing running", style=DIM)
         else:
             pace = Text.assemble(
                 f"{a.rate_hourly:.2f} an hour, lasts ",
-                (fmt_duration(runway), f"bold {RED}" if runway < LOW_RUNWAY else "bold"),
+                (fmt_duration(runway), f"bold {RED}" if low else "bold"),
                 (f" until {(now + runway).astimezone():%a %H:%M}", DIM),
             )
         burn = log.burn(now)
@@ -225,26 +226,38 @@ def state_text(r: Runtime, now: datetime, latest: Resources | None) -> Text:
 
 
 class Runtimes(DataTable):
-    """The list to pick from; the GPU column moves every two seconds."""
+    """The list to pick from, most expensive first; the GPU column moves every two seconds."""
 
-    COLUMNS = ("Name", "Hardware", "GPU", "CU/hr", "Spent", "Up", "State")
+    COLUMNS = ("Name", "Hardware", "GPU", "CU/hr", "Spent", "State")
+    WIDE = 100  # below this many columns "Up" is dropped; the panel still shows it
 
     def on_mount(self) -> None:
         for c in self.COLUMNS:
             self.add_column(c, key=c)
 
+    def fit(self, width: int) -> None:
+        """Show "Up" only when the terminal is wide enough for every column."""
+        has_up = "Up" in self.columns
+        if width >= self.WIDE and not has_up:
+            self.add_column("Up", key="Up")
+        elif width < self.WIDE and has_up:
+            self.remove_column("Up")
+
     def show(self, s: Snapshot, rates: RateBook, samples: Samples) -> None:
-        keys = [r.endpoint for r in s.runtimes]
+        rate_of = {r.endpoint: rates.rate(r, s.runtimes, s.account) for r in s.runtimes}
+        ordered = sorted(s.runtimes, key=lambda r: (rate_of[r.endpoint].hourly is None, -(rate_of[r.endpoint].hourly or 0), r.label))
+        keys = [r.endpoint for r in ordered]
         if [row.value for row in self.rows] != keys:
             selected = self.selected_endpoint
             self.clear()
-            for r in s.runtimes:
-                self.add_row(*["" for _ in self.COLUMNS], key=r.endpoint)
+            for r in ordered:
+                self.add_row(*["" for _ in self.columns], key=r.endpoint)
             if selected in keys:
                 self.move_cursor(row=keys.index(selected))
+        self.border_title = f"Runtimes ({len(keys)})" if keys else "Runtimes"
         now = s.taken_at
-        for r in s.runtimes:
-            rate = rates.rate(r, s.runtimes, s.account)
+        for r in ordered:
+            rate = rate_of[r.endpoint]
             billed = r.billed_for(now)
             up, spent = "?", "?"
             if billed:
@@ -261,7 +274,8 @@ class Runtimes(DataTable):
                 "State": state_text(r, now, samples.latest(r.endpoint)),
             }
             for column, value in cells.items():
-                self.update_cell(r.endpoint, column, value)
+                if column in self.columns:
+                    self.update_cell(r.endpoint, column, value)
         self.show_readings(s, samples)
 
     def show_readings(self, s: Snapshot, samples: Samples) -> None:
@@ -285,6 +299,7 @@ class Confirm(ModalScreen[bool]):
     CSS = """
     Confirm { align: center middle; }
     #dialog { width: 64; height: auto; border: round $warning; padding: 1 2; background: $panel; }
+    #dialog Label { width: 100%; }
     #buttons { height: auto; margin-top: 1; align-horizontal: right; }
     #buttons Button { margin-left: 2; }
     """
@@ -370,11 +385,11 @@ class Dashboard(App):
     Usage Horizontal { height: 3; }
     #usage-text { width: 46; }
     #usage-graph { height: 3; }
-    Runtimes { height: auto; max-height: 9; }
+    Runtimes { height: auto; max-height: 45%; }
     Runtimes:focus { border: round $accent; }
     Runtimes > .datatable--cursor, Runtimes:focus > .datatable--cursor { background: $panel-lighten-1; text-style: bold; }
     Runtimes > .datatable--header { background: $background; color: $text-muted; }
-    RuntimePanel { height: 1fr; min-height: 8; }
+    RuntimePanel { height: 1fr; min-height: 7; }
     RuntimePanel Horizontal { height: 1fr; }
     RuntimePanel .plot { width: 1fr; }
     RuntimePanel .plot-label { height: 1; }
@@ -395,11 +410,11 @@ class Dashboard(App):
         Binding("q", "quit", "Quit"),
     ]
 
-    def __init__(self, colab: Colab):
+    def __init__(self, colab: Colab, cache: Path):
         super().__init__()
         self.colab = colab
-        self.rates = RateBook(CACHE / "rates.json")
-        self.usage = UsageLog(CACHE / "usage.jsonl")
+        self.rates = RateBook(cache / "rates.json")
+        self.usage = UsageLog(cache / "usage.jsonl")
         self.samples = Samples()
         self.email: str | None = None
         self.snapshot: Snapshot | None = None
@@ -417,6 +432,7 @@ class Dashboard(App):
         self.register_theme(THEME)
         self.theme = "cotop"
         self.query_one(Runtimes).border_title = "Runtimes"
+        self.query_one(Runtimes).fit(self.size.width)
         self.action_refresh()
         self.set_interval(POLL_SECONDS, self.action_refresh)
         self.set_interval(SAMPLE_SECONDS, self.action_sample)
@@ -437,9 +453,9 @@ class Dashboard(App):
             self.email = self.email or self.colab.email()
             account = Account.parse(self.email, self.colab.ccu_info())
             assignments = self.colab.assignments()
-            history = History.load(CLI_HOME / "history")
+            history = self.colab.history()
             status = self.colab.status(assignments)
-            runtimes = runtimes_from(assignments, local_sessions(), status, history.assigned_at())
+            runtimes = runtimes_from(assignments, self.colab.sessions(), status, history.assigned_at())
             snapshot = Snapshot(utc_now(), account, runtimes, history)
         except Exception as e:
             self.call_from_thread(self.show_error, e)
@@ -481,6 +497,12 @@ class Dashboard(App):
         self.query_one("#empty").display = bool(self.snapshot) and not self.snapshot.runtimes
         if r:
             panel.show(r, self.snapshot, self.rates)
+
+    def on_resize(self, event: events.Resize) -> None:
+        table = self.query_one(Runtimes)
+        table.fit(event.size.width)
+        if self.snapshot:
+            table.show(self.snapshot, self.rates, self.samples)
 
     def show_error(self, e: Exception) -> None:
         age = f" Showing data from {fmt_duration(utc_now() - self.snapshot.taken_at)} ago." if self.snapshot else ""
@@ -566,12 +588,36 @@ class Dashboard(App):
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-i", "--identity", help="SSH key for x (passed to colab ssh -i)")
+    parser.add_argument("--demo", action="store_true", help="run on a made-up heavy account: no sign-in, nothing touched")
     args = parser.parse_args()
+    if args.demo:
+        run_demo()
+        return
     try:
         colab = Colab.sign_in(ssh_identity=args.identity)  # before the UI: sign-in may prompt in the terminal
     except Exception as e:
         sys.exit(f"cotop: could not sign in with the colab CLI's credentials: {e}")
-    Dashboard(colab).run()
+    Dashboard(colab, CACHE).run()
+
+
+def demo_dashboard(cache: Path) -> Dashboard:
+    """The dashboard on the demo account, its graphs already full."""
+    from cotop.demo import STEP, DemoColab, seed_cache
+
+    colab = DemoColab()
+    seed_cache(cache, colab.start)
+    app = Dashboard(colab, cache=cache)
+    for endpoint, readings in colab.backfill().items():
+        for i, reading in enumerate(readings):
+            app.samples.add(endpoint, colab.start - STEP * (len(readings) - i), reading)
+    return app
+
+
+def run_demo() -> None:
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="cotop-demo-") as cache:
+        demo_dashboard(Path(cache)).run()
 
 
 if __name__ == "__main__":

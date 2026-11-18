@@ -1,8 +1,12 @@
 # Where cotop's numbers come from
 
 cotop polls the account, the runtime list and each runtime's kernels every 15
-seconds, and each runtime's resources every 2 seconds for the graphs. Every
-request is a GET.
+seconds, and each runtime's resources every 2 seconds for the graphs. Watching
+sends only GET requests. Stop sends a POST: the colab CLI's own `colab stop`,
+or for a runtime the CLI didn't start, the CLI client's `unassign` call.
+
+`cotop --demo` runs on `src/cotop/demo.py`, a made-up account, and sends no
+requests at all.
 
 | Panel | Source | Notes |
 |---|---|---|
