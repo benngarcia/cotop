@@ -144,7 +144,10 @@ def _proxy_get(url: str, token: str, path: str, timeout: float):
     headers = {**HEADERS, "X-Colab-Runtime-Proxy-Token": token}
     # Jupyter Server skips activity tracking for this parameter; whether Colab's
     # idle shutdown looks at it is not documented.
-    r = requests.get(url.rstrip("/") + path, headers=headers, params={"no_track_activity": "1"}, timeout=timeout)
+    # The token is for this runtime's proxy only, so a redirect is an error, never followed.
+    r = requests.get(url.rstrip("/") + path, headers=headers, params={"no_track_activity": "1"}, timeout=timeout, allow_redirects=False)
+    if r.is_redirect:
+        raise requests.HTTPError(f"runtime proxy redirected to {r.headers.get('Location', '?')}", response=r)
     r.raise_for_status()
     return parse_json(r.text)
 
