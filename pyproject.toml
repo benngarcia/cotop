@@ -21,7 +21,7 @@ dependencies = [
     # cotop reads the CLI's internals (auth, session file, client), so it pins the minor version.
     "google-colab-cli~=0.8.0",
     "requests",
-    "textual>=6",
+    "textual>=6,<9",  # 6.0 and 8.2 tested; 9 may change the DataTable and screen APIs cotop uses
 ]
 
 [project.urls]
