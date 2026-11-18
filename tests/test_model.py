@@ -14,6 +14,7 @@ from cotop.model import (
     Status,
     UsageLog,
     parse_json,
+    parse_time,
     runtimes_from,
 )
 
@@ -291,3 +292,20 @@ def test_damaged_cache_files_do_not_stop_cotop(tmp_path):
     (tmp_path / "r.json").write_text('{"G4/STANDARD": 10.0')
     assert len(UsageLog(tmp_path / "u.jsonl").samples) == 1
     assert RateBook(tmp_path / "r.json").rates == {}
+
+
+def test_history_skips_lines_it_cannot_read(tmp_path):
+    """The CLI appends as it goes, so the last line can be half written when cotop reads it."""
+    created = '{"timestamp": "2026-11-17T20:59:00+00:00", "event_type": "session_created", "endpoint": "e", "variant": "GPU", "accelerator": "G4", "machine_shape": "STANDARD"}\n'
+    (tmp_path / "train.jsonl").write_bytes(
+        created.encode()
+        + b'[]\n"text"\nnull\n{"event_type": "execution"}\n'
+        + b'{"timestamp": "2026-11-17T21:00:00", "event_type": "execution"}\n'  # no time zone
+        + b'{"timestamp": "2026-11-17T21:01:00+00:00", "event_type": "session_created"}\n'  # no endpoint
+        + b'{"timestamp": "2026-11-17T21:02:00+00:00", "event_type": 7}\n'
+        + b'\xff\xfe{"timestamp": "2026-11-17T21:03:00+00:00", "event_ty'
+    )
+    h = History.load(tmp_path)
+    assert [e.summary for e in h.recent("train")] == ["created"]
+    assert h.assigned_at() == {"e": parse_time("2026-11-17T20:59:00+00:00")}
+    assert [p.endpoint for p in h.past_sessions()] == ["e"]
