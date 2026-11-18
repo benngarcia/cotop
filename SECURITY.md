@@ -16,8 +16,8 @@ project.
 
 ## Reporting a vulnerability
 
-Don't put details in a public issue. Open an issue titled "Security contact"
-with no other text, and the maintainer will reply with a private way to send
-the report.
+Don't put details in a public issue. Report it privately through
+[GitHub's form](https://github.com/benngarcia/cotop/security/advisories/new),
+which goes to the maintainer instead of the public.
 
 Fixes go into the latest release on PyPI.
