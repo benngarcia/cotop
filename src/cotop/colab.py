@@ -27,6 +27,7 @@ HEADERS = {"Accept": "application/json", "X-Colab-Client-Agent": "colab-cli"}
 TIMEOUT = 15
 RESOURCES_TIMEOUT = 3  # readings come every 2 s; one later than that is a gap
 CLI_HOME = Path("~/.config/colab-cli").expanduser()
+SESSIONS = CLI_HOME / "sessions.json"
 
 # The CLI's client logs request headers and bodies at DEBUG; keep tokens out.
 logging.getLogger("colab_cli").setLevel(logging.WARNING)
@@ -84,10 +85,16 @@ class Colab:
             raise RuntimeGone(f"{runtime.name or runtime.endpoint} is no longer this runtime; refresh and retry")
 
     def sessions(self) -> dict[str, dict]:
-        """The CLI's named sessions, without their tokens, read under the CLI's own lock."""
+        """The CLI's named sessions, without their tokens, read under the CLI's own lock.
+
+        None until the CLI first writes the file: before then its store fails,
+        creating its lock before the directory the lock goes in.
+        """
+        if not SESSIONS.exists():
+            return {}
         return {
             name: {"name": s.name, "endpoint": s.endpoint, "running": s.running}
-            for name, s in StateStore().list().items()
+            for name, s in StateStore(str(SESSIONS)).list().items()
         }
 
     def history(self) -> History:

@@ -251,7 +251,7 @@ async def test_runtime_keys_do_nothing_on_the_history_screen(isolated):
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
-        await pilot.press("h", "x", "s", "k")
+        await pilot.press("h", "x", "s", "R")
         await settle(app, pilot)
         assert type(app.screen).__name__ == "HistoryScreen"
         assert colab.calls == []
