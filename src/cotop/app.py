@@ -451,7 +451,7 @@ class Dashboard(App):
             self.polling = self.poll()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
-        if event.worker is self.polling and event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self.refresh_pending:
+        if event.worker is self.polling and event.state == WorkerState.SUCCESS and self.refresh_pending:
             self.action_refresh()
 
     def action_sample(self) -> None:

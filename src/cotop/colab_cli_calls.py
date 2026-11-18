@@ -1,8 +1,8 @@
 """Every call cotop makes into google-colab-cli. No other cotop module imports colab_cli.
 
-The README's "Calls into the Colab CLI" names exactly what this module exports,
-and tests/test_docs.py keeps the two equal. What these calls do inside the CLI
-is the CLI's behavior; this file is where cotop decides what to hand it.
+tests/test_handoff.py pins what it exports and the command lines it builds.
+What these calls do inside the CLI is the CLI's behavior; this file is where
+cotop decides what to hand it.
 """
 
 from __future__ import annotations

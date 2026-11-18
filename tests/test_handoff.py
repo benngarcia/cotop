@@ -42,7 +42,8 @@ def test_only_the_handoff_module_imports_colab_cli_or_touches_the_session():
         if f == Path(colab_cli_calls.__file__):
             continue
         tree = ast.parse(f.read_text())
-        assert not [n for n in ast.walk(tree) if isinstance(n, ast.Attribute) and n.attr == "_session"], f"{f.name} reaches the session"
+        touches = [n for n in ast.walk(tree) if (isinstance(n, ast.Attribute) and n.attr == "_session") or (isinstance(n, ast.Constant) and n.value == "_session")]
+        assert not touches, f"{f.name} reaches the session"
         for module, names in imported_modules(f):
             assert module.split(".")[0] != "colab_cli", f"{f.name} imports {module}"
             if module == HANDOFF:

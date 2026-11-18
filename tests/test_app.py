@@ -354,8 +354,8 @@ async def test_ssh_runs_the_command_line_unchanged(isolated, monkeypatch):
     import cotop.app
 
     colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=11.89)
-    argv = ["/venv/bin/colab", "ssh", "-s", "train"]
-    colab.ssh_command = lambda runtime: argv
+    expected = ["/venv/bin/colab", "ssh", "-s", "train"]
+    colab.ssh_command = lambda runtime: list(expected)  # a fresh list, so a change made in place shows
     ran = []
     monkeypatch.setattr(cotop.app.subprocess, "run", lambda a, **k: ran.append(list(a)) or type("Done", (), {"returncode": 0})())
     app = Dashboard(colab, isolated)
@@ -364,7 +364,7 @@ async def test_ssh_runs_the_command_line_unchanged(isolated, monkeypatch):
         await settle(app, pilot)
         await pilot.press("x")
         await settle(app, pilot)
-    assert ran == [argv]
+    assert ran == [expected]
 
 
 async def test_a_refresh_asked_for_during_a_poll_runs_after_it(isolated):
@@ -405,4 +405,6 @@ def test_the_demo_signs_in_to_nothing_and_leaves_the_cache_alone(tmp_path, monke
     used = []
     monkeypatch.setattr(cotop.app.Dashboard, "run", lambda self: used.append(self))
     cotop.app.run_demo()
-    assert used and not (tmp_path / "home").exists()
+    [app] = used
+    assert home_cache not in (app.rates.path.parent, app.usage.path.parent)
+    assert not (tmp_path / "home").exists()
