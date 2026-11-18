@@ -58,14 +58,12 @@ cotop signs in with the Colab CLI's own credentials, so it can do anything `cola
 
 ### Guarantees
 
-Each of these holds because a test on `main` fails without it:
+Each line names the test on `main` that checks it:
 
 - Before it stops, restarts or opens a shell on a named runtime, cotop checks that the name still points at the runtime you selected (`test_every_named_action_checks_the_name_still_means_this_runtime`).
-- For a runtime the CLI started, the command lines that stop, restart and ssh run have exactly these arguments after the program, unchanged: `stop -s NAME`, `restart-kernel -s NAME` and `ssh -s NAME [-i KEY]` (`test_cotop_runs_exactly_these_command_lines`, `test_ssh_runs_the_command_line_unchanged`).
 - No module in `src/cotop` other than `colab_cli_calls.py` has an import statement for `google-colab-cli`, or writes `_session` (the attribute that holds the signed-in session) as an attribute or a string literal (`test_only_the_handoff_module_imports_colab_cli_or_touches_the_session`).
 - A runtime's proxy token never follows a redirect (`test_the_proxy_token_never_follows_a_redirect`).
 - From the CLI's history, cotop never shows code, outputs or prompt replies (`test_history_never_surfaces_code_outputs_or_stdin`).
-- The demo account that `cotop --demo` opens (`run_demo`) signs in to nothing, connects to nothing, and leaves `~/.cache/cotop` alone (`test_the_demo_signs_in_to_nothing_and_leaves_the_cache_alone`, `test_the_demo_connects_to_nothing_and_runs_nothing`).
 
 ### What cotop does in this release
 
@@ -73,7 +71,8 @@ Each of these holds because a test on `main` fails without it:
 - It sends GET requests to each runtime's proxy, at the URL Colab returns for it, with that runtime's proxy token.
 - It reads the CLI's history files in `~/.config/colab-cli/history/` and the CLI's session list.
 - It writes learned rates and balance samples to `~/.cache/cotop/`.
-- It runs the `colab` commands above when you press `s` or `R` and confirm, or when you press `x`.
+- For a runtime the CLI started, it runs `colab stop -s NAME` or `colab restart-kernel -s NAME` when you press `s` or `R` and confirm, and `colab ssh -s NAME [-i KEY]` when you press `x`.
+- `cotop --demo` runs on a made-up account without signing in, and keeps its cache in a temporary directory.
 
 [docs/data-sources.md](docs/data-sources.md) gives each request and how often cotop sends it.
 
@@ -85,7 +84,7 @@ Each of these holds because a test on `main` fails without it:
   - `Google.get` sends a GET through the session. When the session's access token expires, the session refreshes it with a POST.
   - `Google.unassign` calls the CLI client's `unassign`, to stop a runtime the CLI didn't start.
 - `named_sessions` calls the CLI's `StateStore(path).list()`, once `~/.config/colab-cli/sessions.json` exists.
-- `colab_argv` builds the command lines above.
+- `colab_argv` builds the `colab` command lines described above.
 
 What these calls read, write and send inside the CLI is the CLI's behavior.
 
