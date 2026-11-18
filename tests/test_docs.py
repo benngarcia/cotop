@@ -1,40 +1,53 @@
-"""The README's list of calls into the Colab CLI is the code's list."""
+"""Only cotop.colab_cli_calls touches google-colab-cli, and the README lists what it hands over."""
 
 import ast
 import re
+from dataclasses import fields
 from pathlib import Path
+from typing import get_args
 
-ROOT = Path(__file__).parents[1]
+from cotop import colab_cli_calls
+from cotop.colab_cli_calls import Command, Google
 
-
-def calls_in_code() -> tuple[set[str], set[str]]:
-    """colab_cli names cotop imports, and the colab subcommands it runs."""
-    imported, commands = set(), set()
-    for f in (ROOT / "src" / "cotop").glob("*.py"):
-        for node in ast.walk(ast.parse(f.read_text())):
-            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "colab_cli":
-                imported |= {a.name for a in node.names}
-            elif isinstance(node, ast.Import):
-                imported |= {a.name for a in node.names if a.name.split(".")[0] == "colab_cli"}
-            elif isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_cli":
-                commands |= {a.value for a in node.args[:1] if isinstance(a, ast.Constant)}
-            elif isinstance(node, ast.List) and node.elts and getattr(getattr(node.elts[0], "func", None), "id", None) == "_colab":
-                commands |= {a.value for a in node.elts[1:2] if isinstance(a, ast.Constant)}
-    return imported, commands
+SRC = Path(colab_cli_calls.__file__).parent
+HANDOFF = Path(colab_cli_calls.__file__).stem
+README = SRC.parents[1] / "README.md"
 
 
-def calls_in_readme() -> tuple[set[str], set[str], set[str]]:
-    section = (ROOT / "README.md").read_text().split("### Calls into the Colab CLI")[1].split("\n### ")[0]
-    spans = re.findall(r"`([^`]+)`", section)
-    callees = {m.group(1) for s in spans if (m := re.match(r"(\w+)\(", s))}
-    named = {n for s in spans for n in re.findall(r"\b(\w+)\(", s)}
-    commands = {m.group(1) for s in spans if (m := re.match(r"colab ([a-z-]+)", s))}
-    return callees, named, commands
+def imports(path: Path) -> list[tuple[str, list[str]]]:
+    """(module, names) for every import in a file; `import a.b` gives ("a.b", [])."""
+    out = []
+    for node in ast.walk(ast.parse(path.read_text())):
+        if isinstance(node, ast.Import):
+            out += [(a.name, []) for a in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            out.append((node.module or "", [a.name for a in node.names]))
+    return out
 
 
-def test_the_readme_names_every_call_into_the_colab_cli():
-    imported, run = calls_in_code()
-    callees, named, listed = calls_in_readme()
-    assert imported <= named  # every library name cotop imports appears in the list
-    assert callees <= imported  # and the list names no call cotop doesn't make
-    assert run == listed
+def test_only_the_handoff_module_imports_colab_cli():
+    for f in SRC.glob("*.py"):
+        if f.stem == HANDOFF:
+            continue
+        for module, names in imports(f):
+            assert module.split(".")[0] != "colab_cli", f"{f.name} imports {module}"
+            if module == f"cotop.{HANDOFF}":
+                assert names and set(names) <= set(colab_cli_calls.__all__), f"{f.name} takes {names} from it"
+            if module == "cotop":
+                assert HANDOFF not in names, f"{f.name} imports the module, not its exports"
+
+
+def handoff_section() -> str:
+    return README.read_text().split("### Calls into the Colab CLI")[1].split("\n### ")[0]
+
+
+def test_the_readme_lists_exactly_what_the_handoff_module_exports():
+    functions = {n for n in colab_cli_calls.__all__ if n not in {"Command", "Google"}}
+    exported = functions | {f"Google.{f.name}" for f in fields(Google)}
+    listed = {m.group(1) for m in re.finditer(r"^\s*- `([\w.]+)", handoff_section(), re.M)}
+    assert listed == exported
+
+
+def test_the_readme_lists_exactly_the_colab_commands_cotop_can_run():
+    listed = set(re.findall(r"`colab ([a-z-]+)", handoff_section()))
+    assert listed == set(get_args(Command))

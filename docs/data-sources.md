@@ -20,7 +20,7 @@ requests at all.
 | Runtime names, running command | `~/.config/colab-cli/sessions.json` | Read under the CLI's file lock and joined on `endpoint`. cotop's code never prunes or rewrites this file, which `colab sessions` and `colab status` do. `colab stop`, which cotop runs on `s`, updates it |
 | Kernel state, idle time, clients | Runtime proxy `/api/kernels`, `/api/status` | Requests carry `?no_track_activity=1` |
 | GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. A read that fails or takes over 3 s is a gap in the graph, never a zero |
-| Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Only event types, times and file names are shown. Code, outputs and stdin replies are never shown |
+| Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Code, outputs and stdin replies are never shown |
 
 ## Estimates
 
