@@ -62,3 +62,18 @@ def test_the_proxy_token_never_follows_a_redirect():
     finally:
         proxy.shutdown()
         other.shutdown()
+
+
+def test_the_cli_library_never_logs_below_warning_or_to_its_log_file(monkeypatch):
+    """Its client logs request headers and bodies at DEBUG, even when the root logger takes DEBUG."""
+    import logging
+
+    import cotop.colab  # noqa: F401
+
+    monkeypatch.setattr(logging.getLogger(), "level", logging.DEBUG)
+
+    for name in ("colab_cli", "colab_cli.client"):
+        logger = logging.getLogger(name)
+        assert logger.getEffectiveLevel() == logging.WARNING
+        handlers = logger.handlers + logging.getLogger().handlers
+        assert not [h for h in handlers if str(getattr(h, "baseFilename", "")).endswith("colab.log")]

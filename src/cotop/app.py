@@ -17,7 +17,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.theme import Theme
 from textual.widgets import Button, DataTable, Footer, Label, Static
-from textual.worker import Worker
+from textual.worker import Worker, WorkerState
 
 from cotop.colab import Colab
 from cotop.model import (
@@ -424,6 +424,7 @@ class Dashboard(App):
         self.email: str | None = None
         self.snapshot: Snapshot | None = None
         self.polling: Worker | None = None
+        self.refresh_pending = False  # asked for while a poll ran, which may predate the change
         self.sampling: Worker | None = None
 
     def compose(self) -> ComposeResult:
@@ -445,8 +446,13 @@ class Dashboard(App):
     # Polling: the account and kernel status every 15 s, resources every 2 s.
 
     def action_refresh(self) -> None:
-        if not (self.polling and self.polling.is_running):
+        self.refresh_pending = bool(self.polling and self.polling.is_running)
+        if not self.refresh_pending:
             self.polling = self.poll()
+
+    def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
+        if event.worker is self.polling and event.state in (WorkerState.SUCCESS, WorkerState.ERROR) and self.refresh_pending:
+            self.action_refresh()
 
     def action_sample(self) -> None:
         if self.snapshot and not (self.sampling and self.sampling.is_running):
@@ -585,6 +591,7 @@ class Dashboard(App):
             argv = self.colab.ssh_command(runtime)
         except Exception as e:
             self.call_from_thread(self.notify, f"{runtime.name}: {e}", severity="error", timeout=10)
+            self.call_from_thread(self.action_refresh)
             return
         self.call_from_thread(self.run_in_terminal, argv)
 
