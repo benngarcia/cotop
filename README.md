@@ -61,11 +61,11 @@ cotop signs in with the Colab CLI's own credentials, so it can do anything `cola
 Each of these holds because a test on `main` fails without it:
 
 - Before it stops, restarts or opens a shell on a named runtime, cotop checks that the name still points at the runtime you selected (`test_every_named_action_checks_the_name_still_means_this_runtime`).
-- Stop, restart and ssh run exactly `colab stop -s NAME`, `colab restart-kernel -s NAME` and `colab ssh -s NAME [-i KEY]`, unchanged (`test_cotop_runs_exactly_these_command_lines`, `test_ssh_runs_the_command_line_unchanged`).
-- Only `src/cotop/colab_cli_calls.py` imports `google-colab-cli`, and no other module reads `Google._session`, the signed-in session (`test_only_the_handoff_module_imports_colab_cli_or_touches_the_session`).
+- For a runtime the CLI started, the command lines that stop, restart and ssh run have exactly these arguments after the program, unchanged: `stop -s NAME`, `restart-kernel -s NAME` and `ssh -s NAME [-i KEY]` (`test_cotop_runs_exactly_these_command_lines`, `test_ssh_runs_the_command_line_unchanged`).
+- No module in `src/cotop` other than `colab_cli_calls.py` has an import statement for `google-colab-cli`, or writes `_session` (the attribute that holds the signed-in session) as an attribute or a string literal (`test_only_the_handoff_module_imports_colab_cli_or_touches_the_session`).
 - A runtime's proxy token never follows a redirect (`test_the_proxy_token_never_follows_a_redirect`).
 - From the CLI's history, cotop never shows code, outputs or prompt replies (`test_history_never_surfaces_code_outputs_or_stdin`).
-- `cotop --demo` signs in to nothing, connects to nothing, and leaves `~/.cache/cotop` alone (`test_the_demo_signs_in_to_nothing_and_leaves_the_cache_alone`, `test_the_demo_connects_to_nothing_and_runs_nothing`).
+- The demo account that `cotop --demo` opens (`run_demo`) signs in to nothing, connects to nothing, and leaves `~/.cache/cotop` alone (`test_the_demo_signs_in_to_nothing_and_leaves_the_cache_alone`, `test_the_demo_connects_to_nothing_and_runs_nothing`).
 
 ### What cotop does in this release
 
