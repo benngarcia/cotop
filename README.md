@@ -54,20 +54,34 @@ Estimates start with `≈`, and upper bounds start with `≤`. Colab boots VMs b
 
 ## What cotop can touch
 
-| | What | When |
-|---|---|---|
-| Reads | Your Colab CLI sign-in, through the CLI's own `get_credentials`. If the token has expired, the CLI refreshes it and saves it back to the OS keyring. If there is no token, the CLI asks you to sign in | At start |
-| Reads | `~/.config/colab-cli/sessions.json` (under the CLI's lock) and `~/.config/colab-cli/history/*.jsonl` | Every 15 s |
-| Sends GET | `colab.research.google.com` (balance, runtime list), Google's userinfo endpoint (your email address), and each runtime's proxy (kernels, status, resources) | Every 15 s; resources every 2 s |
-| Writes | `~/.cache/cotop/rates.json` and `~/.cache/cotop/usage.jsonl`, and nothing else | When a rate or the balance changes |
-| Runs | `colab stop -s NAME` or `colab restart-kernel -s NAME` | After you press `s` or `R` and then confirm |
-| Sends POST | The CLI client's `unassign`, for a runtime the CLI didn't start | After you press `s` and then confirm |
-| Runs | `colab ssh -s NAME [-i KEY]` in your terminal | When you press `x` |
+cotop sends some requests itself and leaves the rest to the Colab CLI's library (`google-colab-cli`, pinned to 0.8). The second table lists what those library calls do in 0.8.0.
 
-- cotop sends requests only to Google, and never shows or stores a token.
-- From the CLI's history it shows only event types, times and file names: never code, outputs or anything typed at a prompt.
+**cotop itself**
+
+| What | When |
+|---|---|
+| GET `colab.research.google.com`: balance and runtime list | Every 15 s |
+| GET Google's userinfo endpoint, for your email address | Once, at start |
+| GET each runtime's proxy: kernels and status every 15 s, resources every 2 s | While the runtime is listed |
+| Read `~/.config/colab-cli/history/*.jsonl` | Every 15 s |
+| Write `~/.cache/cotop/rates.json` and `~/.cache/cotop/usage.jsonl` | When a rate or the balance changes |
+
+**Through the Colab CLI**
+
+| Call | When | What it does |
+|---|---|---|
+| `get_credentials()` | At start | Reads the CLI's OAuth token from the OS keyring. If it has expired, refreshes it and saves it back. If there is none, asks you to sign in. Deletes the CLI's old plaintext `~/.config/colab-cli/token.json` if it is still there |
+| The signed-in session that call returns | Each Google request above | POSTs the refresh token to Google's token endpoint when the access token expires, keeping the new one in memory |
+| `StateStore().list()` | Every 15 s, once `~/.config/colab-cli/sessions.json` exists | Reads it under `sessions.json.lock`, which it creates if missing, and sets `sessions.json` to owner-only |
+| `Client.unassign` | After `s` and a yes, for a runtime the CLI didn't start | A GET for a request token, then a POST that stops the runtime |
+| `colab stop -s NAME`, `colab restart-kernel -s NAME` | After `s` or `R` and a yes | The CLI command. Like any `colab` command, it checks `pypi.org` for a CLI update at most once a day and records the check in `~/.config/colab-cli/settings.json` |
+| `colab ssh -s NAME [-i KEY]` | When you press `x` | The same, in your terminal |
+
+- Requests go to Google, plus, from those `colab` commands, `pypi.org`.
+- cotop never shows or stores a token.
+- From the CLI's history, it shows only event types, times and file names. It never shows code, outputs or anything typed at a prompt.
 - Before it runs a CLI command on a name, cotop checks that the name still points at the same runtime.
-- `cotop --demo` touches none of the above: it sends no requests and keeps its cache in a temporary directory.
+- `cotop --demo` does none of the above. It sends no requests and keeps its cache in a temporary directory.
 
 ## Not affiliated with Google
 
