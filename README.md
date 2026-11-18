@@ -58,7 +58,7 @@ cotop signs in with the Colab CLI's own credentials, so it can do anything `cola
 
 ### cotop's own code
 
-This table is complete for cotop's code:
+This table lists what cotop's code does:
 
 | | What | When |
 |---|---|---|
@@ -79,13 +79,13 @@ This table is complete for cotop's code:
 
 `src/cotop/colab_cli_calls.py` is the only part of cotop that imports `google-colab-cli`. Everything cotop hands the CLI passes through it:
 
-- `sign_in` calls the CLI's `get_credentials()` once, at start. The rest of cotop never holds the signed-in session; it gets only these two:
+- `sign_in` calls the CLI's `get_credentials()` once, at start, and returns a `Google` that keeps the signed-in session private. The rest of cotop can use only these two:
   - `Google.get` sends a GET through that session. This is how the requests to `colab.research.google.com` and the userinfo endpoint above go out. When the session's access token expires, the session refreshes it with a POST.
   - `Google.unassign` calls the CLI client's `unassign`, which stops a runtime the CLI didn't start.
 - `named_sessions` calls the CLI's `StateStore(path).list()`, once `~/.config/colab-cli/sessions.json` exists.
-- `colab_argv` builds the command line for the `colab` beside cotop's Python. It refuses any command other than `colab stop -s NAME`, `colab restart-kernel -s NAME` and `colab ssh -s NAME [-i KEY]`.
+- `colab_argv` builds the whole command line for the `colab` beside cotop's Python. cotop runs exactly these: `colab stop -s NAME`, `colab restart-kernel -s NAME` and `colab ssh -s NAME [-i KEY]`.
 
-cotop passes only the arguments listed. What these calls read, write and send inside the CLI is the CLI's behavior, and it is fixed in the CLI. Changing that module changes this list.
+What these calls read, write and send inside the CLI is the CLI's behavior, and it is fixed in the CLI. Changing that module changes this list.
 
 ### What the CLI does (0.8.0; not a complete list)
 

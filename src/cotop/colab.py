@@ -57,16 +57,15 @@ class Colab:
             self.google.unassign(runtime.endpoint)
             return f"Stopped {runtime.endpoint}."
         self.confirm_still_assigned(runtime)
-        return _cli("stop", "-s", runtime.name)
+        return _cli("stop", runtime.name)
 
     def restart_kernel(self, runtime: Runtime) -> str:
         self.confirm_still_assigned(runtime)
-        return _cli("restart-kernel", "-s", runtime.name)
+        return _cli("restart-kernel", runtime.name)
 
     def ssh_command(self, runtime: Runtime) -> list[str]:
         self.confirm_still_assigned(runtime)
-        identity = ["-i", self.ssh_identity] if self.ssh_identity else []
-        return colab_argv("ssh", "-s", runtime.name, *identity)
+        return colab_argv("ssh", runtime.name, self.ssh_identity)
 
     def confirm_still_assigned(self, runtime: Runtime) -> None:
         """Act on a name only while it still means this VM.
@@ -107,9 +106,9 @@ def still_assigned(runtime: Runtime, assignments: list[dict], local: dict[str, d
     return runtime.endpoint in live and local.get(runtime.name, {}).get("endpoint") == runtime.endpoint
 
 
-def _cli(command: Command, *args: str) -> str:
+def _cli(command: Command, name: str) -> str:
     """Run a colab CLI command; its last output line is the result to show."""
-    done = subprocess.run(colab_argv(command, *args), capture_output=True, text=True, timeout=180)
+    done = subprocess.run(colab_argv(command, name), capture_output=True, text=True, timeout=180)
     lines = (done.stdout + done.stderr).strip().splitlines()
     if done.returncode != 0:
         raise RuntimeError(lines[-1] if lines else f"colab {command} exited {done.returncode}")

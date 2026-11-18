@@ -308,3 +308,41 @@ async def test_vim_keys_move_and_restart_needs_shift_r(isolated):
         assert app.screen.query("HelpPanel")
         await pilot.press("question_mark")
         assert not app.screen.query("HelpPanel")
+
+
+async def test_a_failed_ssh_refreshes_like_any_other_action(isolated):
+    """x on a stale name fails, and the list must not stay stale until the next tick."""
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=11.89)
+    polls = []
+    assignments = colab.assignments
+    colab.assignments = lambda: polls.append(1) or assignments()
+
+    def ssh_command(runtime):
+        raise RuntimeError("train is no longer this runtime; refresh and retry")
+
+    colab.ssh_command = ssh_command
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        before = len(polls)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert len(polls) == before + 1
+
+
+async def test_the_demo_connects_to_nothing_and_runs_nothing(tmp_path, monkeypatch):
+    import socket
+    import subprocess
+
+    from cotop.app import demo_dashboard
+
+    attempts = []
+    monkeypatch.setattr(socket.socket, "connect", lambda self, *a: attempts.append(("connect", a)))
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: attempts.append(("run", a)))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **k: attempts.append(("popen", a)))
+    app = demo_dashboard(tmp_path)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("s", "y", "R", "y", "x", "h", "escape", "r")
+        await settle(app, pilot)
+    assert attempts == []

@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import logging
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Literal, get_args
+from typing import Literal, get_args
 
 from colab_cli.auth import get_credentials
 from colab_cli.client import Client, Prod
@@ -25,27 +24,24 @@ Command = Literal["stop", "restart-kernel", "ssh"]
 logging.getLogger("colab_cli").setLevel(logging.WARNING)
 
 
-@dataclass(frozen=True)
 class Google:
-    """All cotop can do with the CLI's signed-in session; the session itself stays in sign_in."""
+    """The CLI's signed-in session, as cotop may use it: GET, and stop a runtime."""
 
-    get: Callable[..., str]  # (url, *, params, headers, timeout) -> body; raises on an HTTP error
-    unassign: Callable[[str], None]  # stop a runtime by endpoint
+    def __init__(self, session):
+        self._session = session
+
+    def get(self, url: str, *, params: dict, headers: dict, timeout: float) -> str:
+        r = self._session.get(url, params=params, headers=headers, timeout=timeout)
+        r.raise_for_status()
+        return r.text
+
+    def unassign(self, endpoint: str) -> None:
+        Client(Prod(), self._session).unassign(endpoint)
 
 
 def sign_in() -> Google:
     """The CLI's own sign-in; it prompts in the terminal if it has no token."""
-    session = get_credentials()
-
-    def get(url: str, *, params: dict, headers: dict, timeout: float) -> str:
-        r = session.get(url, params=params, headers=headers, timeout=timeout)
-        r.raise_for_status()
-        return r.text
-
-    def unassign(endpoint: str) -> None:
-        Client(Prod(), session).unassign(endpoint)
-
-    return Google(get=get, unassign=unassign)
+    return Google(get_credentials())
 
 
 def named_sessions(path: Path) -> dict[str, dict]:
@@ -62,11 +58,13 @@ def named_sessions(path: Path) -> dict[str, dict]:
     }
 
 
-def colab_argv(command: Command, *args: str) -> list[str]:
-    """A command line for the colab CLI installed with cotop, which matches the library above."""
+def colab_argv(command: Command, name: str, identity: str | None = None) -> list[str]:
+    """The whole command line for the colab CLI installed with cotop, which matches the library above."""
     if command not in get_args(Command):
         raise ValueError(f"cotop does not run `colab {command}`")
+    if identity and command != "ssh":
+        raise ValueError(f"`colab {command}` takes no SSH key")
     path = Path(sys.executable).with_name("colab")
     if not path.exists():
         raise FileNotFoundError(f"the colab CLI is missing beside {sys.executable}")
-    return [str(path), command, *args]
+    return [str(path), command, "-s", name, *(["-i", identity] if identity else [])]

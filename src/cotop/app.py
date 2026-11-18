@@ -585,6 +585,7 @@ class Dashboard(App):
             argv = self.colab.ssh_command(runtime)
         except Exception as e:
             self.call_from_thread(self.notify, f"{runtime.name}: {e}", severity="error", timeout=10)
+            self.call_from_thread(self.action_refresh)
             return
         self.call_from_thread(self.run_in_terminal, argv)
 
