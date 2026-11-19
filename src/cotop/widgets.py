@@ -116,16 +116,14 @@ class TimeAxis(Widget):
 
     DEFAULT_CSS = "TimeAxis { height: 1; color: $text-muted; }"
 
-    def __init__(self, time_of: Callable[[int], datetime | None], **kwargs):
-        """time_of(n): when the n-th newest reading was taken."""
-        super().__init__(**kwargs)
-        self.time_of = time_of
+    time_of: reactive[Callable[[int], datetime | None] | None] = reactive(None, always_update=True)
+    """time_of(n): when the n-th newest reading was taken. Each assignment redraws the axis."""
 
     def render(self) -> Text:
         from cotop.model import fmt_duration, utc_now
 
         width = self.size.width
-        oldest = self.time_of(2 * width)
+        oldest = self.time_of(2 * width) if self.time_of else None
         if oldest is None:
             return Text()
         span = fmt_duration(utc_now() - oldest) + " ago"
