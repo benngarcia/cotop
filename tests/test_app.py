@@ -877,10 +877,21 @@ async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_draw
         assert [n.severity for n in app._notifications if "Can't save" in str(n.message)] == ["warning"]
 
 
-def test_a_large_balance_on_one_cpu_runtime_still_draws():
-    """The runway bound only keeps the end date inside a datetime; a real account never reaches it."""
-    a = Account.parse("me@example.com", {"currentBalance": 500_000, "consumptionRateHourly": 0.07, "assignmentsCount": 1})
-    assert "until" in account_text(Snapshot(NOW, a, [], History({})), None).plain
+def test_the_runway_reads_right_from_none_left_to_centuries():
+    def pace(balance, rate):
+        a = Account.parse("me@example.com", {"currentBalance": balance, "consumptionRateHourly": rate, "assignmentsCount": 1})
+        return account_text(Snapshot(NOW, a, [], History({})), None).plain.splitlines()[1]
+
+    def end(hours):
+        return (NOW + timedelta(hours=hours)).astimezone()
+
+    assert pace(100.0, 10.0) == f"10.00 an hour, lasts 10h00m until {end(10):%a %H:%M}"
+    assert pace(5227.43, 1.76) == f"1.76 an hour, lasts 123d18h until {end(5227.43 / 1.76):%b %-d}"  # a weekday would repeat
+    assert pace(-3.5, 1.76) == "1.76 an hour, none left"
+    assert pace(-1e300, 1.0) == "1.00 an hour, none left"
+    assert pace(10.0, 0.0) == "0.00 an hour"
+    assert pace(500_000, 0.07) == "0.07 an hour, lasts over 815 years"  # one CPU runtime
+    assert pace(5227.43, 5e-324) == pace(1e308, 1e-308) == "0.00 an hour, lasts over 1000 years"  # past any date
 
 
 # Fuzz: any value Colab could put at any place in a reply either fails its parse or draws.

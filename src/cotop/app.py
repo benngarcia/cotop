@@ -101,13 +101,23 @@ def account_text(s: Snapshot, burn: float | None) -> Text:
     elif runway is None:
         pace = Text(f"{a.rate_hourly:.2f} an hour")
     else:
-        pace = Text.assemble(
-            f"{a.rate_hourly:.2f} an hour, lasts ",
-            (fmt_duration(runway), f"bold {RED}" if low else "bold"),
-            (f" until {(now + runway).astimezone():%a %H:%M}", DIM),
-        )
+        pace = Text.assemble(f"{a.rate_hourly:.2f} an hour, ", runway_text(runway, now, low))
     charged = Text(f"charged {burn:.2f} an hour over the last hour" if burn is not None else "", style=DIM)
     return Text("\n").join([left, pace, charged])
+
+
+def runway_text(runway: timedelta, now: datetime, low: bool) -> Text:
+    """How long the balance lasts, and until when: a weekday names the day only within the week."""
+    if runway <= timedelta(0):
+        return Text("none left", style=f"bold {RED}")
+    if (years := runway.days // 365) >= 1:
+        return Text(f"lasts over {years} year{'s' if years > 1 else ''}")
+    end = (now + runway).astimezone()
+    return Text.assemble(
+        "lasts ",
+        (fmt_duration(runway), f"bold {RED}" if low else "bold"),
+        (f" until {end:%a %H:%M}" if runway <= timedelta(days=6) else f" until {end:%b %-d}", DIM),
+    )
 
 
 class RuntimePanel(Vertical):

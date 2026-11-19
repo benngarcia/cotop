@@ -21,7 +21,7 @@ from pathlib import Path
 
 XSSI_PREFIX = ")]}'\n"
 SHAPES = {0: "STANDARD", 1: "HIGH_RAM"}
-LONGEST_RUNWAY = timedelta(days=365 * 1000)  # longer is not a real account, and the end date must stay before year 9999
+LONGEST_RUNWAY = timedelta(days=365 * 1000)  # a near-zero rate is a real account; this keeps its runway a timedelta
 
 
 def parse_json(body: str):
@@ -118,13 +118,10 @@ class Account:
     @classmethod
     def parse(cls, email: str, ccu: dict) -> Account:
         """Numbers stay numbers: colab-vscode reads these as z.number(), so a string is an error, not a value."""
-        balance, rate = number(ccu["currentBalance"]), number(ccu["consumptionRateHourly"])
-        if rate and not abs(balance / rate) <= LONGEST_RUNWAY / timedelta(hours=1):
-            raise ValueError(f"{balance} compute units at {rate} an hour is not an account")
         return cls(
             email=string(email),
-            balance=balance,
-            rate_hourly=rate,
+            balance=number(ccu["currentBalance"]),
+            rate_hourly=number(ccu["consumptionRateHourly"]),
             assignments_count=whole(ccu["assignmentsCount"]),
             eligible_gpus=strings(ccu.get("eligibleGpus", [])),
             eligible_tpus=strings(ccu.get("eligibleTpus", [])),
@@ -132,9 +129,11 @@ class Account:
 
     @property
     def runway(self) -> timedelta | None:
+        """How long the balance lasts at this rate, from none left up to LONGEST_RUNWAY; None while it isn't falling."""
         if self.rate_hourly <= 0:
             return None
-        return timedelta(hours=self.balance / self.rate_hourly)
+        hours = self.balance / self.rate_hourly  # inf for a near-zero rate
+        return timedelta(hours=min(max(hours, 0), LONGEST_RUNWAY / timedelta(hours=1)))
 
 
 @dataclass(frozen=True)
