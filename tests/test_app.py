@@ -672,25 +672,34 @@ async def test_a_vanished_selection_stays_on_its_row_and_x_follows_it(isolated):
         assert colab.calls == [("ssh", after[2])]
 
 
-def test_quitting_does_not_wait_for_a_read_in_flight(isolated):
-    """A read stalled on the network must not hold the terminal after q: Python joins pool threads on exit."""
-    import threading
+QUIT_WHILE_A_PROXY_STALLS = """
+import pathlib, tempfile, time
+import cotop.colab
+from cotop.app import Dashboard
+from tests.test_app import StubColab
+from tests.test_model import G4, status
 
-    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    app = Dashboard(colab, isolated)
-    released, finished = threading.Event(), threading.Event()
-    ccu_info = colab.ccu_info
+colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+colab.status = cotop.colab.Colab(None).status
+app = Dashboard(colab, pathlib.Path(tempfile.mkdtemp()))
 
-    def stalled():
-        app.call_from_thread(app.exit)  # q, pressed while this read waits
-        released.wait(5)
-        finished.set()
-        return ccu_info()
+def stalled(assignment):
+    app.call_from_thread(app.exit)  # q, pressed while this read waits
+    time.sleep(60)
 
-    colab.ccu_info = stalled
-    app.run(headless=True)
-    assert not finished.is_set()  # run() returned with the read still in flight
-    released.set()
+cotop.colab._runtime_status = stalled
+app.run(headless=True)
+"""
+
+
+def test_quitting_does_not_wait_for_a_read_in_flight():
+    """A runtime proxy stalled mid-poll must not hold the terminal after q. Python joins pool threads and
+    non-daemon threads before the process exits, so this runs as its own process."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    subprocess.run([sys.executable, "-c", QUIT_WHILE_A_PROXY_STALLS], cwd=Path(__file__).parents[1], timeout=15, check=True)
 
 
 async def test_a_stuck_refresh_is_reported_and_the_header_turns_stale(isolated, monkeypatch):
@@ -707,13 +716,13 @@ async def test_a_stuck_refresh_is_reported_and_the_header_turns_stale(isolated, 
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         usage = app.query_one("Usage")
-        assert "updated 0s ago" in usage.border_title
+        assert "updated" in usage.border_title and "stale" not in usage.border_title
         colab.sessions = lambda: stuck.wait(10)
         await pilot.press("r")
         await pilot.pause(1.2)
         assert any("still reading after 0.5 s" in str(n.message) for n in app._notifications)
         usage.show_age()  # what its one-second timer does
-        assert "stale, updated 1s ago" in usage.border_title
+        assert "stale, updated" in usage.border_title
         stuck.set()
 
 

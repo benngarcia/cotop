@@ -147,6 +147,9 @@ elif mode == "notfound":
     print("[colab] Session 'train' not found.")
 elif mode == "prompt":  # the CLI's sign-in when its token can't be refreshed
     print("read: " + input("Enter the authorization code: "))
+elif mode == "crash":
+    print("[colab] Stopping session 'train'...", flush=True)
+    raise RuntimeError("403 Forbidden for url: .../tun/m/unassign/gpu-g4")
 """
 
 
@@ -162,13 +165,15 @@ def test_a_colab_command_reports_what_it_said_on_stdout_and_reads_no_keys(tmp_pa
     assert colab._cli("warn", "train") == "[colab] Session terminated."
     with pytest.raises(RuntimeError, match="Session 'train' not found"):
         colab._cli("notfound", "train")
+    with pytest.raises(RuntimeError, match="Stopping session 'train'... / RuntimeError: 403 Forbidden"):
+        colab._cli("crash", "train")
     typed, keyboard = os.pipe()  # cotop's stdin, holding keys meant for the dashboard
     os.write(keyboard, b"s\n")
     os.close(keyboard)
     terminal = os.dup(0)
     os.dup2(typed, 0)
     try:
-        with pytest.raises(RuntimeError, match="Enter the authorization code"):
+        with pytest.raises(RuntimeError, match="Enter the authorization code: / EOFError"):
             colab._cli("prompt", "train")
     finally:
         os.dup2(terminal, 0)
