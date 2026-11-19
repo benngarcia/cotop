@@ -1,5 +1,6 @@
 """Fixtures follow the shapes of real Colab responses; every value is made up."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -303,6 +304,105 @@ def test_damaged_cache_files_do_not_stop_cotop(tmp_path):
     (tmp_path / "r.json").write_text('{"G4/STANDARD": 10.0')
     assert len(UsageLog(tmp_path / "u.jsonl").samples) == 1
     assert RateBook(tmp_path / "r.json").rates == {}
+    (tmp_path / "r.json").write_text('{"G4/STANDARD": "10.0"}')
+    assert RateBook(tmp_path / "r.json").rates == {}
+
+
+def test_a_balance_that_is_not_a_number_never_reaches_the_usage_log(tmp_path):
+    """0.3.x wrote one string balance, and every burn for the next hour failed, even after a restart."""
+    (tmp_path / "u.jsonl").write_text(
+        '["2026-11-17T21:00:00+00:00", 5230.0, 10.05]\n["2026-11-17T21:05:00+00:00", "5227.43", 10.05]\n'
+        '["2026-11-17T21:06:00+00:00", NaN, 10.05]\n{"balance": 1}\n'
+    )
+    log = UsageLog(tmp_path / "u.jsonl")
+    assert [b for _, b, _ in log.samples] == [5230.0]
+    for balance, rate in (("5227.43", 10.05), (5227.0, None), (True, 10.05)):
+        with pytest.raises(ValueError):
+            log.record(NOW, balance, rate)
+    for minutes, balance in ((10, 5229.0), (20, 5227.3), (30, 5225.6)):
+        log.record(NOW - timedelta(minutes=60 - minutes), balance, 10.05)
+    assert log.burn(NOW) == pytest.approx(10.2)
+
+
+def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_path):
+    (tmp_path / "cache").mkdir()
+    log = UsageLog(tmp_path / "cache" / "u.jsonl")
+    (tmp_path / "cache" / "u.jsonl").mkdir()  # os.replace onto a directory fails
+    log.record(NOW, 100.0, 10.0)
+    assert isinstance(log.unsaved, OSError) and log.samples == [(NOW, 100.0, 10.0)]
+    assert [p.name for p in (tmp_path / "cache").iterdir()] == ["u.jsonl"]
+    (tmp_path / "cache" / "u.jsonl").rmdir()
+    log.record(NOW, 100.0, 10.0)  # the same sample: still written once the disk takes it
+    assert log.unsaved is None and len(UsageLog(tmp_path / "cache" / "u.jsonl").samples) == 1
+
+    book = RateBook(tmp_path / "cache" / "r.json")
+    (tmp_path / "cache" / "r.json").mkdir()
+    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    assert isinstance(book.unsaved, OSError)
+    (tmp_path / "cache" / "r.json").rmdir()
+    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    assert book.unsaved is None and RateBook(tmp_path / "cache" / "r.json").rates == {"G4/STANDARD": 10.05}
+
+
+def test_whole_numbers_and_zeros_are_numbers():
+    """Over-rejecting blanks a whole reading or refresh, so the plain values JSON sends as ints must pass."""
+    a = Account.parse("me@example.com", {"currentBalance": 5227, "consumptionRateHourly": 0, "assignmentsCount": 0})
+    assert (a.balance, a.rate_hourly, a.eligible_gpus, a.runway) == (5227, 0, (), None)
+    for util in (0, 1, 0.0, 1.0):
+        assert Resources.parse(NOW, {"gpus": [{"gpuUtilization": util}]}).gpu_utilization == util
+    for bad in (True, 85, -0.1, "0.5"):
+        with pytest.raises(ValueError):
+            Resources.parse(NOW, {"gpus": [{"gpuUtilization": bad}]})
+    with pytest.raises(ValueError, match="not a JSON number"):
+        parse_json('{"gpuUtilization": NaN}')
+
+
+def wrong(body: dict, *path, value):
+    body = parse_json(json.dumps(body))
+    node = body
+    for step in path[:-1]:
+        node = node[step]
+    node[path[-1]] = value
+    return body
+
+
+GOOD_CCU = ccu(10.05, 1)
+GOOD_READING = parse_json((FIXTURES / "resources_g4.txt").read_text())
+GOOD_KERNELS = [{"execution_state": "busy", "last_activity": "2026-11-17T21:59:00Z", "connections": 1}]
+
+
+@pytest.mark.parametrize(
+    "parse",
+    [
+        lambda: Account.parse(None, GOOD_CCU),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "assignmentsCount", value=True)),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "assignmentsCount", value=-1)),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "currentBalance", value=float("inf"))),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "currentBalance", value=10**400)),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "eligibleTpus", value="V6E1")),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "memory", "totalBytes", value=True)),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "disks", 0, "filesystem", "usedBytes", value=-1)),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "gpus", 0, "memoryUsedBytes", value=2**63)),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "gpus", 0, "memoryTotalBytes", value=1.5)),
+        lambda: Status.parse({"started": "2026-11-17T20:59:46Z"}, wrong(GOOD_KERNELS, 0, "execution_state", value=None)),
+        lambda: Status.parse({"started": 1763413186}, GOOD_KERNELS),
+        lambda: runtimes_from([wrong(G4, "endpoint", value=7)], {}, {}),
+        lambda: runtimes_from([wrong(G4, "machineShape", value="HIGH_RAM")], {}, {}),
+        lambda: runtimes_from([wrong(G4, "runtimeProxyInfo", "url", value=None)], {}, {}),
+        lambda: runtimes_from([wrong(G4, "runtimeProxyInfo", "token", value=7)], {}, {}),
+    ],
+)
+def test_a_wrong_type_is_turned_away_where_it_is_parsed(parse):
+    """Fixed cases for what the fuzz target finds only on some draws."""
+    with pytest.raises(ValueError):
+        parse()
+
+
+def test_a_runway_too_long_for_a_date_is_not_an_account():
+    """timedelta and the "until" date overflow long before a finite balance or rate does."""
+    for balance, rate in ((5227.43, 5e-324), (1e6, 1e-6), (-1e300, 1.0)):
+        with pytest.raises(ValueError, match="is not an account"):
+            Account.parse("me@example.com", {"currentBalance": balance, "consumptionRateHourly": rate, "assignmentsCount": 1})
 
 
 def test_history_skips_lines_it_cannot_read(tmp_path):
