@@ -87,7 +87,11 @@ class Colab:
     def status(self, assignments: list[dict]) -> dict[str, Status | Exception]:
         """Every runtime at once, each on a daemon thread: a pool's threads would hold up quitting until their reads return."""
         statuses = {}
-        readers = [threading.Thread(target=lambda a=a: statuses.update({a["endpoint"]: _runtime_status(a)}), daemon=True) for a in assignments]
+
+        def read(assignment: dict) -> None:
+            statuses[assignment["endpoint"]] = _runtime_status(assignment)
+
+        readers = [threading.Thread(target=read, args=(a,), daemon=True) for a in assignments]
         for reader in readers:
             reader.start()
         for reader in readers:

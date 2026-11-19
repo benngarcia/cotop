@@ -2,7 +2,10 @@
 
 cotop polls the account, the runtime list and each runtime's kernels at a
 15-second interval, on `r` and after each action, and each runtime's resources
-at a 2-second interval for the graphs. In this release those requests are GETs. The Colab
+at a 2-second interval for the graphs. A poll still reading after 30 seconds
+is abandoned and reported. The account panel's title shows how long ago the
+last poll landed, and turns red once it is over 45 seconds: one interval plus
+that deadline. Quitting never waits for a poll's reads. In this release those requests are GETs. The Colab
 CLI's signed-in session refreshes its access token with a POST when it expires.
 Stop sends a POST: the colab CLI's own `colab stop`, or for a runtime the CLI
 didn't start, the CLI client's `unassign` call.
@@ -99,13 +102,21 @@ idle activity.
 | `R` | `colab restart-kernel -s NAME` | Only for runtimes the CLI started |
 | `x` | `colab ssh -s NAME [-i KEY]` | The dashboard suspends while the shell runs. A failed connection waits for Enter so its error stays readable |
 
+`colab stop` and `colab restart-kernel` run with no input: a prompt from the
+CLI, such as a new sign-in, fails at once instead of waiting unseen behind
+the dashboard. Run the command in a terminal to answer it. cotop shows the
+last line the command printed to standard output. A line ending in
+`not found.` is an error, even though `colab stop` exits 0 for it.
+
 The CLI resolves names, not endpoints. Before a named action, cotop reads
 the assignments and the session file again. It acts only if the name still
 points at the same live VM. A name that was reused since the last poll would
 otherwise point at another VM. `colab ssh` also creates a new runtime for a
 name it does not know. For `x`, the check and the shell run in one step on
 the dashboard's event loop, so no other key or refresh runs between them; the
-dashboard stays frozen while the check reads the assignments.
+dashboard stays frozen while the check reads the assignments. Keys typed
+while it is frozen, and keys the shell left unread, are dropped: they were
+typed before any prompt they would answer was drawn.
 
 A runtime takes one action at a time. From the `y` that confirms a stop or a
 kernel restart until that command returns, `s`, `R` and `x` on that runtime
