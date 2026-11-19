@@ -348,6 +348,13 @@ def test_whole_numbers_and_zeros_are_numbers():
         parse_json('{"gpuUtilization": NaN}')
 
 
+def test_a_runway_too_long_for_a_date_is_not_an_account():
+    """timedelta and the "until" date overflow long before a finite balance or rate does."""
+    for balance, rate in ((5227.43, 5e-324), (1e6, 1e-6), (-1e300, 1.0)):
+        with pytest.raises(ValueError, match="is not an account"):
+            Account.parse("me@example.com", {"currentBalance": balance, "consumptionRateHourly": rate, "assignmentsCount": 1})
+
+
 def test_history_skips_lines_it_cannot_read(tmp_path):
     """The CLI appends as it goes, so the last line can be half written when cotop reads it."""
     created = '{"timestamp": "2026-11-17T20:59:00+00:00", "event_type": "session_created", "endpoint": "e", "variant": "GPU", "accelerator": "G4", "machine_shape": "STANDARD"}\n'
