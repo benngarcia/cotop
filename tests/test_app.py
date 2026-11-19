@@ -477,10 +477,10 @@ async def test_the_demo_runs_and_sorts_the_most_expensive_first(tmp_path):
 
 @pytest.mark.parametrize(
     "state,shown",
-    [("idle", "idle 25m"), ("busy", "busy"), ("starting", "starting"), ("restarting", "restarting"), ("autorestarting", "autorestarting"), ("dead", "kernel dead")],
+    [("idle", "idle 25m"), ("busy", "busy"), ("starting", "starting"), ("dead", "kernel dead"), ("restarting", "restarting"), ("hibernating", "hibernating")],
 )
 def test_only_an_idle_kernel_reads_as_idle(state, shown):
-    """A kernel restarting after R, or dead, is not one idling on the meter."""
+    """A kernel starting again after R, or dead, is not one idling on the meter; a state Jupyter Server doesn't set shows as it came."""
     [r] = runtimes_from([G4], LOCAL, {G4["endpoint"]: status(state, "2026-11-17T21:35:00Z")})
     assert state_text(r, NOW, resources(0.0)).plain == shown
 
@@ -828,7 +828,7 @@ NAN = WIRE["/api/colab/resources"].replace('"gpuUtilization": 1.0', '"gpuUtiliza
         pytest.param(wire(WIRE, "/api/status", "started", value="2026-11-17T20:59:46"), (), "row", id="status_naive_started"),
         pytest.param(wire(WIRE, "/api/kernels", 0, "connections", value=None), (), "row", id="kernels_connections_null"),
         pytest.param(wire(WIRE, "/api/kernels", value={"message": "Forbidden"}), (), "row", id="kernels_error_dict"),
-        pytest.param(wire(WIRE, "/api/kernels", 0, "execution_state", value="hibernating"), (), "row", id="kernels_state_unknown"),
+        pytest.param(wire(WIRE, "/api/kernels", 0, "execution_state", value="hibernating"), (), "ok", id="kernels_state_unlisted"),
         pytest.param(wire(WIRE, "history", value=WIRE["history"].replace('"remote": "/content/out/model.pt"', '"remote": ["a", "b"]')), (), "ok", id="hist_remote_list"),
         pytest.param(wire(WIRE, "history", value=WIRE["history"].replace('"reason": "user_requested"', '"reason": ["x"]')), ("h",), "ok", id="hist_reason_list"),
         pytest.param(wire(WIRE, "history", value=WIRE["history"].replace(f'"endpoint": "{G4["endpoint"]}"', '"endpoint": ["x"]')), (), "ok", id="hist_endpoint_list"),
@@ -998,7 +998,7 @@ def test_every_value_that_parses_draws(data):
         sparkline([reading.gpu_utilization], 8)
     if health:
         assert health.started.tzinfo and all(k.last_activity.tzinfo for k in health.kernels)
-        assert all(type(k.state) is KernelState and is_whole(k.connections) for k in health.kernels)
+        assert all(type(k.state) in (KernelState, str) and is_whole(k.connections) for k in health.kernels)
     for r in runtimes or []:
         assert all(type(v) is str for v in (r.endpoint, r.accelerator, r.shape, r.token)) and (r.url is None or type(r.url) is str)
         r.concerns(NOW, reading)

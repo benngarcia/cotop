@@ -137,19 +137,34 @@ class Account:
 
 
 class KernelState(Enum):
-    """A Jupyter kernel's execution_state, the values jupyter_server sets, most active first."""
+    """The execution_state values Jupyter Server sets in /api/kernels, most active first.
+
+    It sets starting, idle and dead itself, and copies busy, idle or starting
+    from the kernel's status messages (jupyter_server kernelmanager.py and
+    connection/channels.py; jupyter_client docs/messaging.rst). A gateway
+    passes on whatever its server says, so a kernel can report another value.
+    """
 
     BUSY = "busy"
     STARTING = "starting"
-    RESTARTING = "restarting"
-    AUTORESTARTING = "autorestarting"  # it died, and Jupyter is starting it again
     IDLE = "idle"
     DEAD = "dead"
 
 
+def kernel_state(value) -> KernelState | str:
+    """A state Jupyter Server sets, or any other string as it came: never idle, never an error."""
+    state = string(value)
+    return next((s for s in KernelState if s.value == state), state)
+
+
+def activity(state: KernelState | str) -> float:
+    """Its place in KernelState's order; a state Jupyter Server doesn't set goes after starting, as it may be work."""
+    return list(KernelState).index(state) if isinstance(state, KernelState) else 1.5
+
+
 @dataclass(frozen=True)
 class Kernel:
-    state: KernelState
+    state: KernelState | str
     last_activity: datetime
     connections: int
 
@@ -258,7 +273,7 @@ class Samples:
 
 @dataclass(frozen=True)
 class Status:
-    """What the runtime's Jupyter server says about its kernels; a state it doesn't list fails the parse."""
+    """What the runtime's Jupyter server says about its kernels."""
 
     started: datetime
     kernels: tuple[Kernel, ...]
@@ -268,15 +283,15 @@ class Status:
         return cls(
             started=parse_time(status["started"]),
             kernels=tuple(
-                Kernel(KernelState(k["execution_state"]), parse_time(k["last_activity"]), whole(k["connections"]))
+                Kernel(kernel_state(k["execution_state"]), parse_time(k["last_activity"]), whole(k["connections"]))
                 for k in kernels
             ),
         )
 
     @property
-    def state(self) -> KernelState:
+    def state(self) -> KernelState | str:
         """The most active of its kernels' states; idle with no kernel."""
-        return min((k.state for k in self.kernels), key=list(KernelState).index, default=KernelState.IDLE)
+        return min((k.state for k in self.kernels), key=activity, default=KernelState.IDLE)
 
     @property
     def clients(self) -> int:

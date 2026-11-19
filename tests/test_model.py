@@ -10,6 +10,7 @@ from cotop.model import (
     Account,
     History,
     Basis,
+    KernelState,
     Rate,
     RateBook,
     Resources,
@@ -163,14 +164,22 @@ def test_untracked_and_unreachable_runtimes():
         ("idle", "2026-11-17T21:35:00Z", 0.9, []),  # kernel idle, GPU still working
         ("busy", "2026-11-17T21:35:00Z", 0.0, []),
         ("starting", "2026-11-17T21:35:00Z", 0.0, []),  # not idle: as right after R
-        ("restarting", "2026-11-17T21:35:00Z", 0.0, []),
-        ("autorestarting", "2026-11-17T21:35:00Z", 0.0, []),
         ("dead", "2026-11-17T21:35:00Z", 0.0, []),  # a state of its own, not idle
+        ("restarting", "2026-11-17T21:35:00Z", 0.0, []),  # not one Jupyter Server sets: shown, never idle
     ],
 )
 def test_idle_while_billing(state, last_activity, util, expected):
     [r] = runtimes_from([G4], LOCAL, {G4["endpoint"]: status(state, last_activity)})
     assert r.concerns(NOW, resources(util)) == expected
+
+
+@pytest.mark.parametrize(
+    "states,expected",
+    [(("idle", "busy"), KernelState.BUSY), (("idle", "hibernating"), "hibernating"), (("busy", "hibernating"), KernelState.BUSY), (("dead", "idle"), KernelState.IDLE)],
+)
+def test_the_most_active_kernel_decides(states, expected):
+    kernels = [{"execution_state": s, "last_activity": "2026-11-17T21:35:00Z", "connections": 0} for s in states]
+    assert Status.parse({"started": "2026-11-17T20:59:46Z"}, kernels).state == expected
 
 
 def test_full_ram_and_disk_are_concerns():

@@ -263,8 +263,10 @@ def state_text(r: Runtime, now: datetime, latest: Resources | None) -> Text:
             return Text(f"idle {fmt_duration(idle)}" if idle else "idle", style=DIM)
         case KernelState.DEAD:
             return Text("kernel dead", style=ORANGE)
-        case working:  # busy, or starting: never idle billing
+        case KernelState() as working:  # busy or starting
             return Text(working.value, style=AMBER)
+        case other:  # a state Jupyter Server doesn't set, as it came
+            return Text(other)
 
 
 class Runtimes(DataTable):
