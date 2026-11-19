@@ -522,8 +522,9 @@ class Dashboard(App):
     @work
     async def sample(self, runtime: Runtime) -> None:
         reading = await detached(partial(self.colab.resources, runtime))
-        self.reads_out.discard(runtime.endpoint)
-        self.add_readings(utc_now(), {runtime.endpoint: reading})
+        if self.is_running:  # quitting takes the widgets down before it cancels workers
+            self.reads_out.discard(runtime.endpoint)
+            self.add_readings(utc_now(), {runtime.endpoint: reading})
 
     def add_readings(self, at: datetime, readings: dict[str, Resources | Exception]) -> None:
         """Only for runtimes still listed: a read that started before a poll removed its runtime lands nowhere."""

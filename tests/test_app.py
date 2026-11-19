@@ -359,7 +359,7 @@ async def test_one_slow_runtime_holds_back_only_its_own_readings(isolated, monke
 async def test_a_read_that_lands_after_its_runtime_is_gone_is_dropped(isolated):
     colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
     gate, started = threading.Event(), threading.Event()
-    colab.resources = lambda r: (started.set(), gate.wait(5), resources(0.5))[-1]
+    colab.resources = lambda r: (r.endpoint == T4["endpoint"] and (started.set(), gate.wait(5)), resources(0.5))[-1]
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
@@ -367,11 +367,30 @@ async def test_a_read_that_lands_after_its_runtime_is_gone_is_dropped(isolated):
         started.wait(5)
         colab._assignments, colab._status = [G4], {G4["endpoint"]: status()}  # T4 stopped elsewhere
         await pilot.press("r")
-        await settle(app, pilot)
+        while app.polling.is_running:
+            await pilot.pause(0.05)
+        assert T4["endpoint"] in app.reads_out
         gate.set()
-        while app.reads_out:
+        while T4["endpoint"] in app.reads_out:
             await pilot.pause(0.05)
         assert T4["endpoint"] not in app.samples.readings and G4["endpoint"] in app.samples.readings
+
+
+async def test_a_read_that_lands_while_cotop_quits_is_dropped(isolated):
+    """Quitting takes the widgets down before it cancels workers; a reading landing in between must not crash."""
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+
+    def read_until_quit(runtime):
+        while app.is_running:
+            time.sleep(0.001)
+        return resources(0.5)
+
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        colab.resources = read_until_quit
+        app.action_sample()
+    # leaving run_test quits, and re-raises a worker's crash
 
 
 async def test_selection_survives_the_runtime_list_changing(isolated):
