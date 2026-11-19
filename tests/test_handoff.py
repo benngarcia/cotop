@@ -71,6 +71,27 @@ def runtime(name="NAME"):
     return replace(r, name=name)
 
 
+def test_google_get_sends_a_get_through_the_session():
+    """SECURITY.md: cotop sends GET requests through the CLI's signed-in session."""
+    sent = []
+    ok = type("Response", (), {"text": "{}", "raise_for_status": lambda self: None})()
+
+    class Session:  # records whichever request method is called
+        def __getattr__(self, method):
+            return lambda url, **kw: sent.append((method, url)) or ok
+
+    assert Google(Session()).get("https://colab.example/x", params={}, headers={}, timeout=1) == "{}"
+    assert sent == [("get", "https://colab.example/x")]
+
+
+def test_named_sessions_are_read_from_the_cli_store_without_tokens(tmp_path):
+    from colab_cli.state import SessionState, StateStore
+
+    path = tmp_path / "sessions.json"
+    StateStore(str(path)).add(SessionState(name="train", token="SECRET", url="u", endpoint="ep-1", running="run(x)"))
+    assert colab_cli_calls.named_sessions(path) == {"train": {"name": "train", "endpoint": "ep-1", "running": "run(x)"}}
+
+
 def test_cotop_runs_exactly_these_command_lines(ran):
     colab.Colab(None).stop(runtime())
     colab.Colab(None).restart_kernel(runtime())
@@ -98,3 +119,11 @@ def test_colab_argv_refuses_other_commands_and_keys_outside_ssh():
         colab_cli_calls.colab_argv("new", "NAME")
     with pytest.raises(ValueError, match="takes no SSH key"):
         colab_cli_calls.colab_argv("stop", "NAME", "KEY")
+
+
+def test_a_failed_cli_action_is_an_error_not_a_result(ran, monkeypatch):
+    """A `colab stop` that fails must not read as stopped: the VM keeps billing."""
+    failed = type("Done", (), {"returncode": 1, "stdout": "", "stderr": "Error: session NAME not found"})()
+    monkeypatch.setattr(colab.subprocess, "run", lambda argv, **kw: failed)
+    with pytest.raises(RuntimeError, match="session NAME not found"):
+        colab.Colab(None).stop(runtime())

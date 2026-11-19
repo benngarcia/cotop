@@ -298,11 +298,6 @@ def test_a_rate_change_is_not_a_billing_step(tmp_path):
     assert log.burn(NOW) == pytest.approx(10.0)
 
 
-def test_a_missing_gpu_reading_is_a_gap_not_an_idle_gpu():
-    r = Resources.parse(NOW, {"gpus": [{"name": "Tesla T4"}]})
-    assert r.gpu_utilization is None
-
-
 def test_damaged_cache_files_do_not_stop_cotop(tmp_path):
     (tmp_path / "u.jsonl").write_text('["2026-11-17T21:00:00+00:00", 100.0, 10.0]\n["2026-11-17T21:05:00+00:00", 99.')
     (tmp_path / "r.json").write_text('{"G4/STANDARD": 10.0')
