@@ -22,6 +22,7 @@ dependencies = [
     "google-colab-cli~=0.8.0",
     "requests",
     "textual>=6,<9",  # 6.0 and 8.2 tested; 9 may change the DataTable and screen APIs cotop uses
+    "urllib3>=2.2",  # HTTPResponse.read1(): a proxy read's deadline covers the whole reply
 ]
 
 [project.urls]

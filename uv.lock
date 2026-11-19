@@ -284,6 +284,7 @@ dependencies = [
     { name = "google-colab-cli" },
     { name = "requests" },
     { name = "textual" },
+    { name = "urllib3" },
 ]
 
 [package.dev-dependencies]
@@ -297,6 +298,7 @@ requires-dist = [
     { name = "google-colab-cli", specifier = "~=0.8.0" },
     { name = "requests" },
     { name = "textual", specifier = ">=6,<9" },
+    { name = "urllib3", specifier = ">=2.2" },
 ]
 
 [package.metadata.requires-dev]
