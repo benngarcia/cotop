@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from cotop.model import Created, Event, Gpu, History, Kernel, Resources, Runtime, Status, Terminated, utc_now
+from cotop.model import Created, Event, Gpu, History, Kernel, KernelState, Resources, Runtime, Status, Terminated, utc_now
 
 GB = 1_000_000_000
 STEP = timedelta(seconds=2)  # one reading every two seconds, like the real sampler
@@ -96,6 +96,7 @@ class DemoColab:
     def __init__(self, now: datetime | None = None):
         self.start = now or utc_now()
         self.machines = {m.endpoint: m for m in MACHINES}
+        self.events = demo_history(self.start)
 
     # What the dashboard reads.
 
@@ -127,11 +128,11 @@ class DemoColab:
         now = utc_now()
         out = {}
         for a in assignments:
-            m = self.machines[a["endpoint"]]
-            if m.unreachable:
-                out[m.endpoint] = ConnectionError("runtime proxy returned 502")
+            m = self.machines.get(a["endpoint"])
+            if m is None or m.unreachable:  # None: stopped since the assignments were read
+                out[a["endpoint"]] = ConnectionError("runtime proxy returned 502")
                 continue
-            state = "busy" if m.idle_for is None else "idle"
+            state = KernelState.BUSY if m.idle_for is None else KernelState.IDLE
             last = now - (m.idle_for or timedelta(seconds=1))
             out[m.endpoint] = Status(started=now - m.started_ago, kernels=(Kernel(state, last, 1),))
         return out
@@ -156,12 +157,14 @@ class DemoColab:
         return {m.name: {"name": m.name, "endpoint": m.endpoint, "running": m.running} for m in self.machines.values() if m.name}
 
     def history(self) -> History:
-        return History(demo_history(self.start))
+        return History({name: list(events) for name, events in self.events.items()})
 
     # What the dashboard does.
 
     def stop(self, runtime: Runtime) -> str:
         self.machines.pop(runtime.endpoint, None)
+        if runtime.name:
+            self.events[runtime.name].append(Terminated(utc_now(), "user_requested"))
         return "stopped (demo)"
 
     def restart_kernel(self, runtime: Runtime) -> str:

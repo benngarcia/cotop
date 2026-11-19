@@ -5,8 +5,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 from cotop import colab
 from cotop.colab import still_assigned
-from cotop.model import runtimes_from
-from tests.test_model import FIXTURES, G4, LOCAL, T4, assignment
+from tests.test_model import FIXTURES, G4, LOCAL, T4, assignment, running
 
 STATUS = {"/api/status": json.dumps({"started": "2026-11-17T20:59:46Z"}), "/api/kernels": "[]"}
 
@@ -39,12 +38,12 @@ def runtime_proxy(code=200):
 
 
 def test_a_name_counts_only_while_it_still_means_the_same_vm():
-    [r] = runtimes_from([G4], LOCAL, {})
+    [r] = running([G4], LOCAL)
     assert still_assigned(r, [G4], LOCAL)
     assert not still_assigned(r, [], LOCAL)  # VM gone: `colab ssh -s` would create a new one
     reused = {"train": {"name": "train", "endpoint": "gpu-g4-new", "running": None}}
     assert not still_assigned(r, [G4], reused)  # name now means another VM
-    [untracked] = runtimes_from([G4], {}, {})
+    [untracked] = running([G4], {})
     assert not still_assigned(untracked, [G4], {})
 
 
@@ -61,7 +60,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
     """README "Safety": reading a runtime must not keep it from going idle, and must not change it."""
     with runtime_proxy() as (a, seen):
         assert colab.Colab(None).status([a])[a["endpoint"]].started is not None
-        [r] = runtimes_from([a], {}, {})
+        [r] = running([a], {})
         assert colab.Colab(None).resources([r])[r.endpoint] is not None
     assert len(seen) == 3
     assert all(method == "GET" and path.endswith("?no_track_activity=1") for method, path in seen), seen
@@ -69,7 +68,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
 
 def test_a_failed_resources_read_is_a_gap_not_a_zero():
     with runtime_proxy(code=502) as (a, _):
-        [r] = runtimes_from([a], {}, {})
+        [r] = running([a], {})
         assert colab.Colab(None).resources([r]) == {r.endpoint: None}
 
 
@@ -77,7 +76,7 @@ def test_an_untracked_stop_unassigns_that_runtimes_endpoint():
     """A runtime with no CLI name is stopped through the client, by its endpoint."""
     unassigned = []
     google = type("Google", (), {"unassign": lambda self, endpoint: unassigned.append(endpoint)})()
-    [untracked] = runtimes_from([T4], {}, {})
+    [untracked] = running([T4], {})
     colab.Colab(google).stop(untracked)
     assert unassigned == [T4["endpoint"]]
 

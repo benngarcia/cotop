@@ -16,7 +16,10 @@ bytes. A value of the wrong type never reaches the screen. In the account or
 the runtime list, it fails the refresh, and a message names the value; the
 last data stays on screen. In a runtime's kernel status, it shows in that
 runtime's row. A runtime that Colab lists without a proxy yet shows as
-unreachable until Colab gives it one.
+unreachable until Colab gives it one. cotop cannot tell a VM that is still
+booting from one that is down: both fail the read. A kernel's state must be
+one Jupyter Server sets: busy, idle, starting, restarting, autorestarting or
+dead. Only an idle kernel counts toward idle time.
 
 `cotop --demo` runs on `src/cotop/demo.py`, a made-up account, and sends no
 requests at all.

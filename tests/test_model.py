@@ -16,6 +16,7 @@ from cotop.model import (
     Samples,
     Snapshot,
     Status,
+    Unreachable,
     UsageLog,
     parse_json,
     parse_time,
@@ -63,6 +64,11 @@ def status(state="busy", last_activity="2026-11-17T21:59:00Z"):
         {"started": "2026-11-17T20:59:46.480319Z", "last_activity": last_activity, "kernels": 1, "connections": 1},
         [{"id": "k", "name": "python3", "last_activity": last_activity, "execution_state": state, "connections": 1}],
     )
+
+
+def running(assignments, local):
+    """The runtimes, each with a busy kernel."""
+    return runtimes_from(assignments, local, {a["endpoint"]: status() for a in assignments})
 
 
 def resources(util=1.0, at=NOW, ram_free=None, disk_used=None):
@@ -120,11 +126,11 @@ def test_single_runtime_gets_the_reported_account_rate(tmp_path):
 
 
 def test_mixed_hardware_does_not_give_every_row_the_account_total(tmp_path):
-    s = snapshot(runtimes_from([G4, T4], LOCAL, {}), 11.89)
+    s = snapshot(running([G4, T4], LOCAL), 11.89)
     book = RateBook(tmp_path / "r.json")
     assert [book.rate(r, s).basis for r in s.runtimes] == [Basis.UNKNOWN, Basis.UNKNOWN]
 
-    for alone in (snapshot(runtimes_from([G4], LOCAL, {}), 10.05), snapshot(runtimes_from([T4, T4], {}, {}), 3.68)):
+    for alone in (snapshot(running([G4], LOCAL), 10.05), snapshot(running([T4, T4], {}), 3.68)):
         book.observe(alone)
         book.observe(alone)  # the next poll agrees
     assert [book.rate(r, s).hourly for r in s.runtimes] == [10.05, 1.84]
@@ -133,20 +139,19 @@ def test_mixed_hardware_does_not_give_every_row_the_account_total(tmp_path):
 
 def test_rate_book_learns_nothing_from_a_mixed_set(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    book.observe(snapshot(runtimes_from([G4, T4], LOCAL, {}), 11.89))
+    book.observe(snapshot(running([G4, T4], LOCAL), 11.89))
     assert book.rates == {}
 
 
 def test_same_kind_runtimes_split_the_total(tmp_path):
-    s = snapshot(runtimes_from([T4, assignment("gpu-t4-s-def", "T4")], {}, {}), 3.68)
+    s = snapshot(running([T4, assignment("gpu-t4-s-def", "T4")], {}), 3.68)
     rate = RateBook(tmp_path / "r.json").rate(s.runtimes[0], s)
     assert (rate.hourly, rate.basis) == (1.84, Basis.SPLIT)
 
 
 def test_untracked_and_unreachable_runtimes():
-    runtimes = runtimes_from([G4, CPU], LOCAL, {G4["endpoint"]: ConnectionError("proxy said 502")})
-    assert runtimes[0].status is None and runtimes[0].error == "ConnectionError: proxy said 502"
-    assert runtimes[0].concerns(NOW, None) == ["unreachable: ConnectionError: proxy said 502"]
+    runtimes = runtimes_from([G4, CPU], LOCAL, {G4["endpoint"]: ConnectionError("proxy said 502"), CPU["endpoint"]: status()})
+    assert runtimes[0].health == Unreachable("ConnectionError: proxy said 502")
     assert (runtimes[1].label, runtimes[1].hardware) == ("untracked", "CPU")
 
 
@@ -157,6 +162,10 @@ def test_untracked_and_unreachable_runtimes():
         ("idle", "2026-11-17T21:55:00Z", 0.0, []),  # idle, but not for long
         ("idle", "2026-11-17T21:35:00Z", 0.9, []),  # kernel idle, GPU still working
         ("busy", "2026-11-17T21:35:00Z", 0.0, []),
+        ("starting", "2026-11-17T21:35:00Z", 0.0, []),  # not idle: as right after R
+        ("restarting", "2026-11-17T21:35:00Z", 0.0, []),
+        ("autorestarting", "2026-11-17T21:35:00Z", 0.0, []),
+        ("dead", "2026-11-17T21:35:00Z", 0.0, []),  # a state of its own, not idle
     ],
 )
 def test_idle_while_billing(state, last_activity, util, expected):
@@ -238,7 +247,7 @@ def test_history_never_surfaces_code_outputs_or_stdin(tmp_path):
     text = " ".join(e.summary for e in h.recent("train"))
     assert text == "terminated (user_requested) download model.pt input_reply exec cell 3 created"
     [p] = h.past_sessions()
-    assert (p.kind, p.ended - p.created, p.reason) == ("G4/STANDARD", timedelta(minutes=31), "user_requested")
+    assert (p.kind, p.ending.at - p.created, p.ending.reason) == ("G4/STANDARD", timedelta(minutes=31), "user_requested")
 
 
 def test_history_reads_fields_of_the_wrong_type_as_missing(tmp_path):
@@ -250,7 +259,7 @@ def test_history_reads_fields_of_the_wrong_type_as_missing(tmp_path):
     )
     h = History.load(tmp_path)
     assert [e.summary for e in h.recent("train")] == ["terminated (?)", "download ", "created"]
-    assert [p.reason for p in h.past_sessions()] == [None]
+    assert [p.ending.reason for p in h.past_sessions()] == [None]
 
 
 def test_reused_names_are_separate_sessions_and_repeats_fold(tmp_path):
@@ -263,7 +272,7 @@ def test_reused_names_are_separate_sessions_and_repeats_fold(tmp_path):
         + "".join(poll % f"2026-11-17T21:4{i}:00+00:00" for i in range(5))
     )
     h = History.load(tmp_path)
-    assert [(p.created.hour, p.ended is None) for p in h.past_sessions()] == [(20, True), (20, False)]
+    assert [(p.created.hour, p.ending is None) for p in h.past_sessions()] == [(20, True), (20, False)]
     assert [p.created.minute for p in h.past_sessions()] == [59, 11]
     assert [e.summary for e in h.recent("train")] == ["download live.json ×5", "created", "terminated (user_requested)", "created"]
 
@@ -282,7 +291,7 @@ def test_billing_starts_at_assignment_not_vm_boot(tmp_path):
 
 def test_a_read_that_straddles_a_start_or_stop_gives_no_exact_rate(tmp_path):
     """The count says the account's rate covers other runtimes than the ones listed."""
-    [t4] = runtimes = runtimes_from([T4], {}, {})
+    [t4] = runtimes = running([T4], {})
     straddling = [snapshot(runtimes, 16.81, count=2), snapshot(runtimes, 0.0, count=0)]
     assert [RateBook(tmp_path / "r.json").rate(t4, s) for s in straddling] == [Rate(None, Basis.UNKNOWN)] * 2
     (tmp_path / "r.json").write_text('{"T4/STANDARD": 1.84}')
@@ -300,7 +309,7 @@ def test_spend_is_an_upper_bound_only_when_rate_and_time_both_are():
 
 def test_rate_book_skips_reads_that_straddle_a_start_or_stop(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    for straddling in (snapshot(runtimes_from([G4], LOCAL, {}), 11.89, count=2), snapshot(runtimes_from([G4], LOCAL, {}), 0, count=1)):
+    for straddling in (snapshot(running([G4], LOCAL), 11.89, count=2), snapshot(running([G4], LOCAL), 0, count=1)):
         book.observe(straddling)
         book.observe(straddling)
     assert book.rates == {}
@@ -309,7 +318,7 @@ def test_rate_book_skips_reads_that_straddle_a_start_or_stop(tmp_path):
 def test_a_kind_swap_between_the_reads_teaches_nothing(tmp_path):
     """An H100 stops and a T4 starts between the account read and the list: the count still matches."""
     book = RateBook(tmp_path / "r.json")
-    h100, t4 = runtimes_from([assignment("gpu-h100-s-x", "H100")], {}, {}), runtimes_from([T4], {}, {})
+    h100, t4 = running([assignment("gpu-h100-s-x", "H100")], {}), running([T4], {})
     for s in (snapshot(h100, 15.04), snapshot(h100, 15.04), snapshot(t4, 15.04)):
         book.observe(s)
     assert RateBook(tmp_path / "r.json").rates == {"H100/STANDARD": 15.04}
@@ -321,11 +330,11 @@ def test_a_kind_swap_between_the_reads_teaches_nothing(tmp_path):
 def test_learned_rates_are_scaled_to_add_up_to_the_account_total(tmp_path):
     (tmp_path / "r.json").write_text('{"G4/STANDARD": 5.0, "T4/STANDARD": 1.0}')  # learned when both cost less
     book = RateBook(tmp_path / "r.json")
-    s = snapshot(runtimes_from([G4, T4], LOCAL, {}), 12.0)
+    s = snapshot(running([G4, T4], LOCAL), 12.0)
     assert [book.rate(r, s) for r in s.runtimes] == [Rate(10.0, Basis.LEARNED), Rate(2.0, Basis.LEARNED)]
     straddling = snapshot(s.runtimes, 12.0, count=3)  # the total covers a runtime not listed
     assert [book.rate(r, straddling).hourly for r in s.runtimes] == [5.0, 1.0]
-    partly_known = snapshot(runtimes_from([G4, T4, CPU], LOCAL, {}), 12.0)  # the CPU's share is not known
+    partly_known = snapshot(running([G4, T4, CPU], LOCAL), 12.0)  # the CPU's share is not known
     assert [book.rate(r, partly_known).hourly for r in partly_known.runtimes] == [5.0, 1.0, None]
 
 
@@ -408,7 +417,7 @@ def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_pat
 
     book = RateBook(tmp_path / "cache" / "r.json")
     (tmp_path / "cache" / "r.json").mkdir()
-    g4 = snapshot(runtimes_from([G4], LOCAL, {}), 10.05)
+    g4 = snapshot(running([G4], LOCAL), 10.05)
     book.observe(g4)
     book.observe(g4)
     assert isinstance(book.unsaved, OSError)
@@ -459,10 +468,10 @@ GOOD_KERNELS = [{"execution_state": "busy", "last_activity": "2026-11-17T21:59:0
         lambda: Resources.parse(NOW, wrong(GOOD_READING, "gpus", 0, "memoryTotalBytes", value=1.5)),
         lambda: Status.parse({"started": "2026-11-17T20:59:46Z"}, wrong(GOOD_KERNELS, 0, "execution_state", value=None)),
         lambda: Status.parse({"started": 1763413186}, GOOD_KERNELS),
-        lambda: runtimes_from([wrong(G4, "endpoint", value=7)], {}, {}),
-        lambda: runtimes_from([wrong(G4, "machineShape", value="HIGH_RAM")], {}, {}),
-        lambda: runtimes_from([wrong(G4, "runtimeProxyInfo", "url", value=None)], {}, {}),
-        lambda: runtimes_from([wrong(G4, "runtimeProxyInfo", "token", value=7)], {}, {}),
+        lambda: running([wrong(G4, "endpoint", value=7)], {}),
+        lambda: running([wrong(G4, "machineShape", value="HIGH_RAM")], {}),
+        lambda: running([wrong(G4, "runtimeProxyInfo", "url", value=None)], {}),
+        lambda: running([wrong(G4, "runtimeProxyInfo", "token", value=7)], {}),
     ],
 )
 def test_a_wrong_type_is_turned_away_where_it_is_parsed(parse):

@@ -136,9 +136,20 @@ class Account:
         return timedelta(hours=min(max(hours, 0), LONGEST_RUNWAY / timedelta(hours=1)))
 
 
+class KernelState(Enum):
+    """A Jupyter kernel's execution_state, the values jupyter_server sets, most active first."""
+
+    BUSY = "busy"
+    STARTING = "starting"
+    RESTARTING = "restarting"
+    AUTORESTARTING = "autorestarting"  # it died, and Jupyter is starting it again
+    IDLE = "idle"
+    DEAD = "dead"
+
+
 @dataclass(frozen=True)
 class Kernel:
-    state: str
+    state: KernelState
     last_activity: datetime
     connections: int
 
@@ -247,7 +258,7 @@ class Samples:
 
 @dataclass(frozen=True)
 class Status:
-    """What the runtime's Jupyter server says about its kernels."""
+    """What the runtime's Jupyter server says about its kernels; a state it doesn't list fails the parse."""
 
     started: datetime
     kernels: tuple[Kernel, ...]
@@ -257,22 +268,23 @@ class Status:
         return cls(
             started=parse_time(status["started"]),
             kernels=tuple(
-                Kernel(string(k["execution_state"]), parse_time(k["last_activity"]), whole(k["connections"]))
+                Kernel(KernelState(k["execution_state"]), parse_time(k["last_activity"]), whole(k["connections"]))
                 for k in kernels
             ),
         )
 
     @property
-    def busy(self) -> bool:
-        return any(k.state == "busy" for k in self.kernels)
+    def state(self) -> KernelState:
+        """The most active of its kernels' states; idle with no kernel."""
+        return min((k.state for k in self.kernels), key=list(KernelState).index, default=KernelState.IDLE)
 
     @property
     def clients(self) -> int:
         return sum(k.connections for k in self.kernels)
 
     def idle_for(self, now: datetime) -> timedelta | None:
-        """How long every kernel has been idle; None while one is busy."""
-        if self.busy:
+        """How long every kernel has been idle; None while one is doing anything else, or is dead."""
+        if self.state is not KernelState.IDLE:
             return None
         if not self.kernels:
             return now - self.started
@@ -283,6 +295,13 @@ class Status:
 
 
 @dataclass(frozen=True)
+class Unreachable:
+    """Why the runtime's Jupyter server could not be read, as text: the exception's traceback holds the proxy token."""
+
+    error: str
+
+
+@dataclass(frozen=True)
 class Runtime:
     """One Colab assignment: a VM the account is paying for."""
 
@@ -290,12 +309,11 @@ class Runtime:
     accelerator: str
     shape: str
     url: str | None  # None: Colab has not given it a runtime proxy yet
-    token: str = field(default="", repr=False)  # runtime proxy token: used for requests, never shown
+    token: str = field(repr=False)  # runtime proxy token: used for requests, never shown
+    health: Status | Unreachable
     name: str | None = None  # the colab CLI's local name, if it made this one
     running: str | None = None
     assigned_at: datetime | None = None  # from the CLI's history; Colab boots VMs before handing them out
-    status: Status | None = None
-    error: str | None = None
 
     @property
     def kind(self) -> str:
@@ -309,9 +327,13 @@ class Runtime:
     def label(self) -> str:
         return self.name or "untracked"
 
+    @property
+    def busy(self) -> bool:
+        return isinstance(self.health, Status) and self.health.state is KernelState.BUSY
+
     def idle_for(self, now: datetime) -> timedelta | None:
         """Idle time on the meter: a VM's kernel can sit idle before Colab hands it out."""
-        idle = self.status.idle_for(now) if self.status else None
+        idle = self.health.idle_for(now) if isinstance(self.health, Status) else None
         if idle is None or self.assigned_at is None:
             return idle
         return min(idle, now - self.assigned_at)
@@ -320,14 +342,12 @@ class Runtime:
         """Time on the meter, and whether it is exact or only an upper bound (VM boot)."""
         if self.assigned_at:
             return now - self.assigned_at, True
-        if self.status:
-            return self.status.uptime(now), False
+        if isinstance(self.health, Status):
+            return self.health.uptime(now), False
         return None
 
     def concerns(self, now: datetime, resources: Resources | None) -> list[str]:
-        """What is wrong with this runtime, worst first, each short enough for a table cell."""
-        if self.error:
-            return [f"unreachable: {self.error}"]
+        """What is wrong with this runtime besides being unreachable, worst first, each short enough for a table cell."""
         found = []
         idle = self.idle_for(now)
         util = resources.gpu_utilization if resources else None
@@ -500,14 +520,13 @@ class PastSession:
     endpoint: str
     kind: str
     created: datetime
-    ended: datetime | None  # None: no terminate event; live, or reclaimed without the CLI noticing
-    reason: str | None
+    ending: Terminated | None  # None: no terminate event; live, or reclaimed without the CLI noticing
 
     def lasted(self, now: datetime, live: set[str]) -> tuple[timedelta, bool] | None:
         """How long it ran, and whether that is exact or only an upper bound; None if unknown."""
-        if self.ended:
+        if self.ending:
             # "pruned" is when the CLI noticed the VM was gone, not when it went
-            return self.ended - self.created, self.reason != "pruned"
+            return self.ending.at - self.created, self.ending.reason != "pruned"
         if self.endpoint in live:
             return now - self.created, True
         return None
@@ -528,8 +547,8 @@ class Created:
     kind: str
     summary = "created"
 
-    def session(self, name: str, ended: Terminated | None) -> PastSession:
-        return PastSession(name, self.endpoint, self.kind, self.at, ended.at if ended else None, ended.reason if ended else None)
+    def session(self, name: str, ending: Terminated | None) -> PastSession:
+        return PastSession(name, self.endpoint, self.kind, self.at, ending)
 
 
 @dataclass(frozen=True)
@@ -642,14 +661,15 @@ def runtimes_from(
     """Join the server's assignments with the CLI's names, history and kernel status.
 
     An assignment with a field of the wrong type fails the whole poll, loudly:
-    leaving it out would hide a VM that is billing.
+    leaving it out would hide a VM that is billing. So does one without a
+    status: Colab.status reads one for every assignment it is given.
     """
     by_endpoint = {s["endpoint"]: s for s in local.values()}
     runtimes = []
     for a in assignments:
         endpoint = string(a["endpoint"])
         mine = by_endpoint.get(endpoint, {})
-        t = status.get(endpoint)
+        t = status[endpoint]
         url, token = runtime_proxy(a) or (None, "")
         shape = whole(a.get("machineShape", 0))  # an int enum in the colab CLI's ListedAssignment
         runtimes.append(
@@ -659,11 +679,10 @@ def runtimes_from(
                 shape=SHAPES.get(shape, str(shape)),
                 url=url,
                 token=token,
+                health=t if isinstance(t, Status) else Unreachable(f"{type(t).__name__}: {t}"),
                 name=mine.get("name"),
                 running=mine.get("running"),
                 assigned_at=(assigned_at or {}).get(endpoint),
-                status=t if isinstance(t, Status) else None,
-                error=f"{type(t).__name__}: {t}" if isinstance(t, Exception) else None,
             )
         )
     return runtimes
