@@ -252,12 +252,12 @@ class Runtimes(DataTable):
         ordered = sorted(s.runtimes, key=lambda r: (rate_of[r.endpoint].hourly is None, -(rate_of[r.endpoint].hourly or 0), r.label))
         keys = [r.endpoint for r in ordered]
         if [row.value for row in self.rows] != keys:
-            selected = self.selected_endpoint
+            selected, row = self.selected_endpoint, self.cursor_row
             self.clear()
             for r in ordered:
                 self.add_row(*["" for _ in self.columns], key=r.endpoint)
-            if selected in keys:
-                self.move_cursor(row=keys.index(selected))
+            # A selection that vanished stays on its row, not row 0; the cursor clamps to the table.
+            self.move_cursor(row=keys.index(selected) if selected in keys else row)
         self.border_title = f"Runtimes ({len(keys)})" if keys else "Runtimes"
         now = s.taken_at
         for r in ordered:
@@ -426,6 +426,7 @@ class Dashboard(App):
         self.polling: Worker | None = None
         self.refresh_pending = False  # asked for while a poll ran, which may predate the change
         self.sampling: Worker | None = None
+        self.acting: set[str] = set()  # endpoints with a stop or kernel restart not yet returned
 
     def compose(self) -> ComposeResult:
         yield Usage(self.usage)
@@ -531,30 +532,42 @@ class Dashboard(App):
             return None
         return next((r for r in self.snapshot.runtimes if r.endpoint == endpoint), None)
 
-    def named(self, verb: str) -> Runtime | None:
+    def target(self, named_to: str | None = None) -> Runtime | None:
+        """The selected runtime, if it can take an action now; named_to: a verb that needs a CLI name."""
         r = self.selected_runtime()
-        if r and r.name is None:
-            self.notify(f"Can only {verb} runtimes started with the colab CLI.", severity="warning")
-            return None
-        return r
+        if r and r.endpoint in self.acting:  # a second action would race the first
+            self.notify(f"Still waiting for the last action on {r.name or r.endpoint}.", severity="warning")
+        elif r and named_to and r.name is None:
+            self.notify(f"Can only {named_to} runtimes started with the colab CLI.", severity="warning")
+        else:
+            return r
+        return None
 
     def action_stop(self) -> None:
-        if not (r := self.selected_runtime()):
+        if not (r := self.target()):
             return
         busy = f" It is busy running {r.running}." if r.status and r.status.busy and r.running else ""
         question = f"Stop {r.name or r.endpoint} ({r.hardware})? Its VM and files will be deleted.{busy}"
         self.push_screen(Confirm(question, "Stop"), lambda yes: yes and self.act(self.colab.stop, r))
 
     def action_restart_kernel(self) -> None:
-        if not (r := self.named("restart the kernel of")):
+        if not (r := self.target(named_to="restart the kernel of")):
             return
         busy = " Its running code is interrupted." if r.status and r.status.busy else ""
         question = f"Restart {r.name}'s kernel? Everything in memory is lost; files stay.{busy}"
         self.push_screen(Confirm(question, "Restart"), lambda yes: yes and self.act(self.colab.restart_kernel, r))
 
     def action_ssh(self) -> None:
-        if r := self.named("ssh into"):
-            self.open_ssh(r)
+        """Check the name and open the shell in one step on the event loop, so nothing runs in between."""
+        if not (r := self.target(named_to="ssh into")):
+            return
+        try:
+            argv = self.colab.ssh_command(r)
+        except Exception as e:
+            self.notify(f"{r.name}: {e}", severity="error", timeout=10)
+        else:
+            self.run_in_terminal(argv)
+        self.action_refresh()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         """Runtime keys work only on the dashboard, where you can see the runtime they act on."""
@@ -573,8 +586,12 @@ class Dashboard(App):
         if self.snapshot:
             self.push_screen(HistoryScreen(self.snapshot, self.rates))
 
-    @work(thread=True)
     def act(self, action, runtime: Runtime) -> None:
+        self.acting.add(runtime.endpoint)  # here on the event loop, before the next key is read
+        self.send(action, runtime)
+
+    @work(thread=True)
+    def send(self, action, runtime: Runtime) -> None:
         label = runtime.name or runtime.endpoint
         self.call_from_thread(self.notify, f"{action.__name__.replace('_', ' ')} {label}…")
         try:
@@ -583,25 +600,16 @@ class Dashboard(App):
             self.call_from_thread(self.notify, f"{label}: {e}", severity="error", timeout=10)
         else:
             self.call_from_thread(self.notify, f"{label}: {result}")
-        self.call_from_thread(self.action_refresh)
-
-    @work(thread=True)
-    def open_ssh(self, runtime: Runtime) -> None:
-        try:
-            argv = self.colab.ssh_command(runtime)
-        except Exception as e:
-            self.call_from_thread(self.notify, f"{runtime.name}: {e}", severity="error", timeout=10)
+        finally:
+            self.call_from_thread(self.acting.discard, runtime.endpoint)
             self.call_from_thread(self.action_refresh)
-            return
-        self.call_from_thread(self.run_in_terminal, argv)
 
     def run_in_terminal(self, argv: list[str]) -> None:
-        # suspend() blocks the event loop, so no timer redraws behind the shell
+        # suspend() blocks the event loop, so no timer redraws behind the shell and no key acts until it closes
         with self.suspend():
             code = subprocess.run(argv).returncode
             if code != 0:  # keep colab's error on screen; resuming would paint over it
                 input(f"\ncolab ssh exited {code}. Press Enter to return to cotop.")
-        self.action_refresh()
 
 
 def main() -> None:
