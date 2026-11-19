@@ -30,8 +30,9 @@ graph:
 
 - a reading, once the read returns;
 - a gap, never a zero, when the read fails or the whole reply takes over
-  3 s. The deadline covers the full reply, so a proxy that sends it a few
-  bytes at a time is cut off too;
+  3 s. A proxy that sends the body a few bytes at a time is cut off at 3 s.
+  One that trickles its headers can hold the read longer, and the reply is
+  still a gap;
 - a gap when the runtime's last read is still out at the next tick, so the
   graph keeps time while one read is slow.
 

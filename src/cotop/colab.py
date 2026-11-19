@@ -126,11 +126,12 @@ def _cli(command: Command, name: str) -> str:
 
 
 def _proxy_get(url: str, token: str, path: str, timeout: float):
-    """GET a path on a runtime's proxy, all of it within timeout seconds.
+    """GET a path on a runtime's proxy; a reply not complete within timeout seconds raises.
 
     requests applies a timeout to each socket wait, so a proxy that trickles
-    its reply never trips it; the body is read a chunk at a time against a
-    deadline instead, and a reply that misses it raises.
+    its reply never trips it. The body is read a chunk at a time and cut off
+    at the deadline. Headers can't be: requests returns only once they are
+    all in, so a reply whose headers trickle raises when they finish.
     """
     deadline = time.monotonic() + timeout
     headers = {**HEADERS, "X-Colab-Runtime-Proxy-Token": token}

@@ -1,3 +1,4 @@
+import gzip
 import json
 import threading
 import time
@@ -6,6 +7,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 
 import pytest
 import requests
+import urllib3
 
 from cotop import colab
 from cotop.colab import still_assigned
@@ -176,11 +178,19 @@ def say_nothing(handler):
     time.sleep(3)
 
 
-@pytest.mark.parametrize("reply", [dribble, dribble_chunked, stall_after_headers, say_nothing])
-def test_a_proxy_read_ends_at_its_deadline_however_the_reply_stalls(reply):
-    """data-sources.md: a read that takes over 3 s is a gap. Here the deadline is 1 s."""
-    from cotop.colab import _proxy_get
+def trickle_headers(handler):
+    """Headers a few bytes at a time: requests waits for all of them before cotop sees the reply."""
+    body = (FIXTURES / "resources_g4.txt").read_bytes()
+    head = f"HTTP/1.0 200 OK\r\nContent-Length: {len(body)}\r\nX-Pad: {'x' * 24}\r\n\r\n".encode()
+    for i in range(0, len(head), 8):
+        handler.wfile.write(head[i : i + 8])
+        handler.wfile.flush()
+        time.sleep(0.2)
+    handler.wfile.write(body)
 
+
+@contextmanager
+def proxy_replying(reply):
     class Proxy(BaseHTTPRequestHandler):
         def do_GET(self):
             try:
@@ -193,13 +203,69 @@ def test_a_proxy_read_ends_at_its_deadline_however_the_reply_stalls(reply):
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    started = time.monotonic()
     try:
-        with pytest.raises(Exception):
-            _proxy_get(f"http://127.0.0.1:{server.server_port}", "t", "/api/colab/resources", 1)
-        assert time.monotonic() - started < 2  # the deadline, plus at most one socket wait
+        yield f"http://127.0.0.1:{server.server_port}"
     finally:
         server.shutdown()
+
+
+TIMEOUTS = (TimeoutError, requests.Timeout, urllib3.exceptions.TimeoutError)
+
+
+@pytest.mark.parametrize("reply", [dribble, dribble_chunked, stall_after_headers, say_nothing])
+def test_a_proxy_read_ends_at_its_deadline_however_the_reply_stalls(reply):
+    """data-sources.md: a read that takes over 3 s is a gap. Here the deadline is 1 s."""
+    from cotop.colab import _proxy_get
+
+    with proxy_replying(reply) as url:
+        started = time.monotonic()
+        with pytest.raises(TIMEOUTS):
+            _proxy_get(url, "t", "/api/colab/resources", 1)
+        assert time.monotonic() - started < 2  # the deadline, plus at most one socket wait
+
+
+def test_a_reply_whose_headers_trickle_past_the_deadline_is_still_a_gap():
+    """requests can't be cut off inside the headers; the reply that follows them is late, so it is no reading."""
+    from cotop.colab import _proxy_get
+
+    with proxy_replying(trickle_headers) as url, pytest.raises(TimeoutError):
+        _proxy_get(url, "t", "/api/colab/resources", 1)
+
+
+def content_length(handler, body):
+    handler.send_response(200)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def gzipped(handler, body):
+    zipped = gzip.compress(body)
+    handler.send_response(200)
+    handler.send_header("Content-Encoding", "gzip")
+    handler.send_header("Content-Length", str(len(zipped)))
+    handler.end_headers()
+    handler.wfile.write(zipped)
+
+
+def chunked(handler, body):
+    handler.protocol_version = "HTTP/1.1"
+    handler.send_response(200)
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.end_headers()
+    for i in range(0, len(body), 100):
+        part = body[i : i + 100]
+        handler.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+    handler.wfile.write(b"0\r\n\r\n")
+
+
+@pytest.mark.parametrize("framing", [content_length, gzipped, chunked])
+def test_a_prompt_reply_is_a_reading_however_it_is_framed(framing):
+    body = (FIXTURES / "resources_g4.txt").read_bytes()
+    with proxy_replying(lambda handler: framing(handler, body)) as url:
+        [r] = runtimes_from([{**G4, "runtimeProxyInfo": {"url": url, "token": "t"}}], {}, {})
+        reading = colab.Colab(None).resources(r)
+    assert reading.gpu_utilization == 1.0 and reading.vram == (90_000_000_000, 100_000_000_000)
 
 
 FAKE_COLAB = """
