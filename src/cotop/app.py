@@ -517,7 +517,7 @@ class Dashboard(App):
 
     def show_error(self, e: Exception) -> None:
         age = f" Showing data from {fmt_duration(utc_now() - self.snapshot.taken_at)} ago." if self.snapshot else ""
-        self.notify(f"Refresh failed: {type(e).__name__}: {e}.{age}", severity="error", timeout=POLL_SECONDS)
+        self.notify(f"Refresh failed: {type(e).__name__}: {e}.{age}", severity="error", timeout=POLL_SECONDS, markup=False)
 
     # Selection and actions.
 

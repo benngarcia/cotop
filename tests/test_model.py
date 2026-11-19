@@ -211,6 +211,18 @@ def test_history_never_surfaces_code_outputs_or_stdin(tmp_path):
     assert (p.kind, p.ended - p.created, p.reason) == ("G4/STANDARD", timedelta(minutes=31), "user_requested")
 
 
+def test_history_reads_fields_of_the_wrong_type_as_missing(tmp_path):
+    """A field that is not text must not reach the screen, where a list breaks Path() and dict lookups."""
+    (tmp_path / "train.jsonl").write_text(
+        SECRET_HISTORY.splitlines(keepends=True)[0]
+        + '{"timestamp": "2026-11-17T21:02:00+00:00", "event_type": "file_operation", "op": "download", "remote": ["a", "b"]}\n'
+        '{"timestamp": "2026-11-17T21:30:00+00:00", "event_type": "session_terminated", "reason": ["x"]}\n'
+    )
+    h = History.load(tmp_path)
+    assert [e.summary for e in h.recent("train")] == ["terminated (?)", "download ", "created"]
+    assert [p.reason for p in h.past_sessions()] == [None]
+
+
 def test_reused_names_are_separate_sessions_and_repeats_fold(tmp_path):
     created = '{"timestamp": "%s", "event_type": "session_created", "endpoint": "e", "variant": "GPU", "accelerator": "G4", "machine_shape": "STANDARD"}\n'
     poll = '{"timestamp": "%s", "event_type": "file_operation", "op": "download", "remote": "/content/live.json", "local": "x"}\n'
