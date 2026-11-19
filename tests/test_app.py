@@ -1241,6 +1241,7 @@ async def test_loading_state_shows_until_first_poll_and_clears_on_data(isolated)
         assert not app.query_one("Usage").display
         assert not app.query_one(Runtimes).display
         assert not app.query_one(RuntimePanel).display
+        assert not ({"s", "R", "x", "h"} & {k.key for k in app.query("FooterKey")})
         await pilot.press("h", "s")
         await pilot.pause()
         assert app.screen is app.screen_stack[0]
@@ -1251,11 +1252,23 @@ async def test_loading_state_shows_until_first_poll_and_clears_on_data(isolated)
         assert app.query_one(Runtimes).display
         assert app.query_one(RuntimePanel).display
         assert app.focused is app.query_one(Runtimes)
+        assert {"s", "R", "x", "h"} <= {k.key for k in app.query("FooterKey")}
 
 
 async def test_initial_load_failure_stops_spinner_and_retries_on_r(isolated):
     colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
     colab.fail = True
+    retry_started, retry_gate = threading.Event(), threading.Event()
+    orig_ccu = colab.ccu_info
+
+    def ccu_info():
+        if colab.fail:
+            return orig_ccu()
+        retry_started.set()
+        retry_gate.wait(5)
+        return orig_ccu()
+
+    colab.ccu_info = ccu_info
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
@@ -1265,6 +1278,11 @@ async def test_initial_load_failure_stops_spinner_and_retries_on_r(isolated):
         assert not app.query_one(Runtimes).display
         colab.fail = False
         await pilot.press("r")
+        retry_started.wait(5)
+        await pilot.pause()
+        assert app.query_one("#loading-spinner").display is True
+        assert "Loading Colab" in str(app.query_one("#loading-text").render())
+        retry_gate.set()
         await settle(app, pilot)
         assert not app.query("#loading")
         assert app.query_one(Runtimes).display

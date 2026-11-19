@@ -382,10 +382,11 @@ class HistoryScreen(Screen):
     def __init__(self, s: Snapshot, rates: RateBook):
         super().__init__()
         self.snapshot, self.rates = s, rates
+        self.sessions = s.history.past_sessions()
 
     def compose(self) -> ComposeResult:
         s = self.snapshot
-        if s.history.past_sessions():
+        if self.sessions:
             table = DataTable(cursor_type="row", zebra_stripes=True, classes="panel")
             table.border_title = "Sessions started with the colab CLI"
             yield table
@@ -408,14 +409,13 @@ class HistoryScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
-        s = self.snapshot
-        sessions = s.history.past_sessions()
-        if not sessions:
+        if not self.sessions:
             return
+        s = self.snapshot
         table = self.query_one(DataTable)
         table.add_columns("Name", "Hardware", "Started", "Lasted", "CU", "Ended")
         live = {r.endpoint for r in s.runtimes}
-        for p in sessions:
+        for p in self.sessions:
             run = p.lasted(s.taken_at, live)
             ended = ENDINGS.get(p.ending.reason, p.ending.reason or "ended") if p.ending else "running" if p.endpoint in live else "unknown"
             table.add_row(

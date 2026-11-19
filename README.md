@@ -2,7 +2,7 @@
 
 `top` for Google Colab. Watch your compute units, burn rate, and live runtimes, with 2-second GPU graphs and idle-billing warnings.
 
-![cotop --demo: cycling through twelve runtimes with j, live GPU graphs, the ? keys panel, past sessions on h, and the stop confirmation](https://raw.githubusercontent.com/benngarcia/cotop/main/docs/images/demo.gif)
+![cotop: cycling through twelve runtimes with j, live GPU graphs, the ? keys panel, past sessions on h, and the stop confirmation](https://raw.githubusercontent.com/benngarcia/cotop/main/docs/images/demo.gif)
 
 ## Install
 
@@ -11,7 +11,6 @@ Requires Python 3.12 or later on macOS or Linux. Tested on macOS.
 ```sh
 uv tool install cotop
 cotop
-cotop --demo              # 12 made-up runtimes, no sign-in
 cotop -i ~/.ssh/KEY.pub   # custom public key for colab ssh on x
 ```
 
