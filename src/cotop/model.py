@@ -16,6 +16,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from itertools import pairwise
 from pathlib import Path
 
 XSSI_PREFIX = ")]}'\n"
@@ -451,18 +452,24 @@ class UsageLog:
             self.unsaved = write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
 
     def burn(self, now: datetime, window: timedelta = timedelta(hours=1)) -> float | None:
-        """Compute units per hour actually charged within the window."""
+        """Compute units per hour charged within the window: the drops between settled steps, over the time they span.
+
+        A top-up's step counts as no charge, so while one is in the window the figure is a floor.
+        Once no step has come for longer than the longest gap between steps, nothing is being
+        charged, as after a stop, and that time counts too.
+        """
         steps = []
         for t, b, _ in self.samples:
             if now - t <= window and (not steps or steps[-1][1] != b):
                 steps.append((t, b))
-        if len(steps) < 3:  # the first is a baseline, not a settled step
+        settled = steps[1:]  # the first is a baseline, not a settled step
+        gaps = list(pairwise(settled))
+        charged = sum(max(b0 - b1, 0) for (_, b0), (_, b1) in gaps)
+        if not charged:
             return None
-        (t0, b0), (t1, b1) = steps[1], steps[-1]
-        hours = (t1 - t0).total_seconds() / 3600
-        if hours < 0.1 or b1 > b0:  # too short, or a top-up landed
-            return None
-        return (b0 - b1) / hours
+        quiet_from = now - max(t1 - t0 for (t0, _), (t1, _) in gaps)
+        hours = (max(settled[-1][0], quiet_from) - settled[0][0]) / timedelta(hours=1)
+        return charged / hours if hours >= 0.1 else None
 
     def rate_series(self, now: datetime, columns: int, window: timedelta = timedelta(hours=24)) -> list[float | None]:
         """The hourly rate across the window in equal steps, oldest first; None before the first sample."""

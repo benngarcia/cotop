@@ -178,7 +178,7 @@ def test_burn_is_measured_between_settled_steps(tmp_path):
         log.record(start + timedelta(minutes=5 * i + 2), 100.0 - 0.84 * i, 10.05)
         log.record(start + timedelta(minutes=5 * i + 3), 100.0 - 0.84 * i, 10.05)  # unchanged, not stored
     assert len(log.samples) == 6
-    assert log.burn(NOW) == pytest.approx(10.08)
+    assert log.burn(start + timedelta(minutes=30)) == pytest.approx(10.08)  # three minutes after the last step
     assert UsageLog(tmp_path / "u.jsonl").samples == log.samples
 
 
@@ -189,6 +189,28 @@ def test_burn_ignores_top_ups_and_short_windows(tmp_path):
     assert log.burn(NOW) is None  # one settled step is not a rate
     log.record(NOW - timedelta(minutes=10), 600.0, 10.0)
     assert log.burn(NOW) is None
+
+
+def test_a_top_up_in_the_window_counts_as_no_charge_not_a_refund(tmp_path):
+    log = UsageLog(tmp_path / "u.jsonl")
+    balance = 200.0
+    log.record(NOW - timedelta(minutes=58), balance, 15.0)  # baseline
+    for k in range(1, 12):  # 1.25 every 5 minutes is 15 an hour
+        balance += 10.0 - 1.25 if k == 6 else -1.25  # 10 arrive in the sixth step
+        log.record(NOW - timedelta(minutes=58 - 5 * k), balance, 15.0)
+    # the top-up's step hides its own charge, so nine steps' charge over the 50 minutes: a floor
+    assert log.burn(NOW) == pytest.approx(9 * 1.25 / (50 / 60))
+
+
+def test_burn_after_a_stop_counts_the_quiet_time_since(tmp_path):
+    log = UsageLog(tmp_path / "u.jsonl")
+    log.record(NOW - timedelta(minutes=59), 300.0, 15.0)  # baseline
+    for k in range(10):  # 0.5 every 2 minutes is 15 an hour, from -58m to -40m
+        log.record(NOW - timedelta(minutes=58 - 2 * k), 299.5 - 0.5 * k, 15.0)
+    log.record(NOW - timedelta(minutes=39), 295.0, 0.0)  # stopped
+    assert log.burn(NOW - timedelta(minutes=39)) == pytest.approx(15.0)  # a step may still be on its way
+    # no step for 40 minutes against 2-minute steps: 4.5 charged from -58m until one step after the last
+    assert log.burn(NOW) == pytest.approx(4.5 / (56 / 60))
 
 
 def test_rate_series_steps_through_the_day(tmp_path):
@@ -370,7 +392,7 @@ def test_a_balance_that_is_not_a_number_never_reaches_the_usage_log(tmp_path):
             log.record(NOW, balance, rate)
     for minutes, balance in ((10, 5229.0), (20, 5227.3), (30, 5225.6)):
         log.record(NOW - timedelta(minutes=60 - minutes), balance, 10.05)
-    assert log.burn(NOW) == pytest.approx(10.2)
+    assert log.burn(NOW - timedelta(minutes=25)) == pytest.approx(10.2)  # five minutes after the last step
 
 
 def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_path):
