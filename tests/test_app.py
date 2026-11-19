@@ -266,14 +266,15 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
 async def test_the_activity_panel_shows_history_without_code(isolated, tmp_path):
     """SECURITY.md: from the CLI's history, cotop never shows code, outputs or prompt replies."""
     execution = {"timestamp": utc_now().isoformat(), "event_type": "execution", "cell_index": 3, "code": "SECRET_CODE", "outputs": ["SECRET_OUT"]}
+    reply = {"timestamp": utc_now().isoformat(), "event_type": "input_reply", "value": "SECRET_PASSWORD"}
     colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    history = cli_history(tmp_path / "history", train=[execution])
+    history = cli_history(tmp_path / "history", train=[execution, reply])
     colab.history = lambda: history
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         activity = str(app.query_one(RuntimePanel).query_one(".activity").render())
-        assert "exec cell 3" in activity and "SECRET" not in activity
+        assert "exec cell 3" in activity and "input_reply" in activity and "SECRET" not in activity
 
 
 async def test_estimates_and_upper_bounds_are_marked_and_spend_is_rate_times_time(isolated):
