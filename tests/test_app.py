@@ -1218,3 +1218,101 @@ async def test_a_read_that_returns_while_cotop_quits_touches_no_widgets(isolated
 
         colab.ccu_info = returns_as_cotop_quits
         app.action_refresh()
+
+
+async def test_loading_state_shows_until_first_poll_and_clears_on_data(isolated):
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    gate, started = threading.Event(), threading.Event()
+    ccu_info = colab.ccu_info
+
+    def slow_ccu():
+        started.set()
+        gate.wait(5)
+        return ccu_info()
+
+    colab.ccu_info = slow_ccu
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        started.wait(5)
+        await pilot.pause()
+        assert app.query_one("#loading").display is True
+        assert app.query_one("#loading-spinner").display is True
+        assert "Loading Colab" in str(app.query_one("#loading-text").render())
+        assert not app.query_one("Usage").display
+        assert not app.query_one(Runtimes).display
+        assert not app.query_one(RuntimePanel).display
+        assert not ({"s", "R", "x", "h"} & {k.key for k in app.query("FooterKey")})
+        await pilot.press("h", "s")
+        await pilot.pause()
+        assert app.screen is app.screen_stack[0]
+        gate.set()
+        await settle(app, pilot)
+        assert not app.query("#loading")
+        assert app.query_one("Usage").display
+        assert app.query_one(Runtimes).display
+        assert app.query_one(RuntimePanel).display
+        assert app.focused is app.query_one(Runtimes)
+        assert {"s", "R", "x", "h"} <= {k.key for k in app.query("FooterKey")}
+
+
+async def test_initial_load_failure_stops_spinner_and_retries_on_r(isolated):
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    colab.fail = True
+    retry_started, retry_gate = threading.Event(), threading.Event()
+    orig_ccu = colab.ccu_info
+
+    def ccu_info():
+        if colab.fail:
+            return orig_ccu()
+        retry_started.set()
+        retry_gate.wait(5)
+        return orig_ccu()
+
+    colab.ccu_info = ccu_info
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        assert app.query_one("#loading").display is True
+        assert app.query_one("#loading-spinner").display is False
+        assert "Press r to retry" in str(app.query_one("#loading-text").render())
+        assert not app.query_one(Runtimes).display
+        colab.fail = False
+        await pilot.press("r")
+        retry_started.wait(5)
+        await pilot.pause()
+        assert app.query_one("#loading-spinner").display is True
+        assert "Loading Colab" in str(app.query_one("#loading-text").render())
+        retry_gate.set()
+        await settle(app, pilot)
+        assert not app.query("#loading")
+        assert app.query_one(Runtimes).display
+        assert app.query_one(Runtimes).row_count == 1
+        assert app.focused is app.query_one(Runtimes)
+
+
+async def test_quitting_works_while_loading(isolated):
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    gate, started = threading.Event(), threading.Event()
+    colab.ccu_info = lambda: (started.set(), gate.wait(5), ccu(10.05, 1))[2]
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        started.wait(5)
+        await pilot.pause()
+        assert app.query_one("#loading").display is True
+        await pilot.press("q")
+        await pilot.pause()
+        assert not app.is_running
+    gate.set()
+
+
+async def test_empty_history_screen_explains_local_only_history(isolated):
+    app = Dashboard(StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05), isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("h")
+        await pilot.pause()
+        assert type(app.screen).__name__ == "HistoryScreen"
+        empty = str(app.screen.query_one("#history-empty").render())
+        assert "on this machine" in empty and "~/.config/colab-cli/history" in empty
+        assert not app.screen.query("DataTable")
+

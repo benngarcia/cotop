@@ -23,7 +23,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.theme import Theme
-from textual.widgets import Button, DataTable, Footer, Label, Static
+from textual.widgets import Button, DataTable, Footer, Label, LoadingIndicator, Static
 from textual.worker import Worker, WorkerState, get_current_worker
 
 from cotop.model import (
@@ -382,12 +382,23 @@ class HistoryScreen(Screen):
     def __init__(self, s: Snapshot, rates: RateBook):
         super().__init__()
         self.snapshot, self.rates = s, rates
+        self.sessions = s.history.past_sessions()
 
     def compose(self) -> ComposeResult:
         s = self.snapshot
-        table = DataTable(cursor_type="row", zebra_stripes=True, classes="panel")
-        table.border_title = "Sessions started with the colab CLI"
-        yield table
+        if self.sessions:
+            table = DataTable(cursor_type="row", zebra_stripes=True, classes="panel")
+            table.border_title = "Sessions started with the colab CLI"
+            yield table
+        else:
+            empty = Static(
+                "No colab CLI sessions on this machine yet.\n"
+                "Colab's API does not return past sessions; history comes from ~/.config/colab-cli/history/.",
+                id="history-empty",
+                classes="panel",
+            )
+            empty.border_title = "Sessions started with the colab CLI"
+            yield empty
         a = s.account
         eligible = Static(
             Text.assemble(("GPU  ", DIM), " ".join(a.eligible_gpus) or "none", ("    TPU  ", DIM), " ".join(a.eligible_tpus) or "none"),
@@ -398,11 +409,13 @@ class HistoryScreen(Screen):
         yield Footer()
 
     def on_mount(self) -> None:
+        if not self.sessions:
+            return
         s = self.snapshot
         table = self.query_one(DataTable)
         table.add_columns("Name", "Hardware", "Started", "Lasted", "CU", "Ended")
         live = {r.endpoint for r in s.runtimes}
-        for p in s.history.past_sessions():
+        for p in self.sessions:
             run = p.lasted(s.taken_at, live)
             ended = ENDINGS.get(p.ending.reason, p.ending.reason or "ended") if p.ending else "running" if p.endpoint in live else "unknown"
             table.add_row(
@@ -424,15 +437,15 @@ class Dashboard(App):
         border: round $panel-lighten-2; border-title-color: $foreground; border-subtitle-color: $text-muted;
         padding: 0 1; background: $background;
     }
-    Usage { height: 5; }
+    Usage { height: 5; display: none; }
     Usage Horizontal { height: 3; }
     #usage-text { width: 46; }
     #usage-graph { height: 3; }
-    Runtimes { height: auto; max-height: 45%; }
+    Runtimes { height: auto; max-height: 45%; display: none; }
     Runtimes:focus { border: round $accent; }
     Runtimes > .datatable--cursor, Runtimes:focus > .datatable--cursor { background: $panel-lighten-1; text-style: bold; }
     Runtimes > .datatable--header { background: $background; color: $text-muted; }
-    RuntimePanel { height: 1fr; min-height: 7; }
+    RuntimePanel { height: 1fr; min-height: 7; display: none; }
     RuntimePanel Horizontal { height: 1fr; }
     RuntimePanel .plot { width: 1fr; }
     RuntimePanel .plot-label { height: 1; }
@@ -440,9 +453,13 @@ class Dashboard(App):
     RuntimePanel .meters { height: auto; margin-bottom: 1; }
     RuntimePanel .facts { height: auto; margin-bottom: 1; }
     RuntimePanel .activity { height: 1fr; }
+    #loading { height: 1fr; align: center middle; }
+    #loading-spinner { height: 1; margin-bottom: 1; }
+    #loading-text { width: 100%; text-align: center; color: $text-muted; }
     #empty { height: 1fr; content-align: center middle; color: $text-muted; display: none; }
     HistoryScreen DataTable { height: 1fr; }
     HistoryScreen .panel { height: auto; }
+    #history-empty { height: 1fr; content-align: center middle; text-align: center; color: $text-muted; }
     """
     BINDINGS = [
         ("r", "refresh", "Refresh"),
@@ -470,6 +487,9 @@ class Dashboard(App):
         self.input_from = 0.0  # Textual's clock (monotonic): input made before this is dropped unread
 
     def compose(self) -> ComposeResult:
+        with Vertical(id="loading"):
+            yield LoadingIndicator(id="loading-spinner")
+            yield Static("Loading Colab…", id="loading-text")
         yield Usage(self.usage)
         yield Runtimes(cursor_type="row", cursor_foreground_priority="renderable")
         yield RuntimePanel(self.samples)
@@ -490,6 +510,8 @@ class Dashboard(App):
     def action_refresh(self) -> None:
         self.refresh_pending = bool(self.polling and self.polling.is_running)
         if not self.refresh_pending:
+            if self.snapshot is None:
+                self.show_loading("Loading Colab…", spinning=True)
             self.polling = self.poll()
 
     def on_worker_state_changed(self, event: Worker.StateChanged) -> None:
@@ -557,15 +579,31 @@ class Dashboard(App):
 
     # Showing.
 
+    def show_loading(self, text: str, *, spinning: bool) -> None:
+        """Initial load only: once the first snapshot has landed, #loading is gone."""
+        for loading in self.query("#loading"):
+            loading.query_one("#loading-spinner").display = spinning
+            loading.query_one("#loading-text", Static).update(text)
+
     def show(self, s: Snapshot) -> None:
+        first = self.snapshot is None
         self.snapshot = s
         self.usage.record(s.taken_at, s.account.balance, s.account.rate_hourly)
         self.rates.observe(s)
         self.samples.keep_only({r.endpoint for r in s.runtimes})
-        self.query_one(Usage).show(s, self.usage)
+        usage = self.query_one(Usage)
+        table = self.query_one(Runtimes)
+        if first:
+            for loading in self.query("#loading"):
+                loading.display = False
+                loading.remove()
+            usage.display = True
+            table.display = True
+            table.focus()
+            self.refresh_bindings()
+        usage.show(s, self.usage)
         # The table stays visible when empty: hiding a focused widget blurs it, and
         # nothing would give the selection's only home its focus back.
-        table = self.query_one(Runtimes)
         table.show(s, self.rates, self.samples)
         self.show_selected()
         self.report_unsaved()
@@ -595,6 +633,8 @@ class Dashboard(App):
 
     def show_error(self, e: Exception) -> None:
         """The account header already says how old the data on screen is."""
+        if self.snapshot is None:
+            self.show_loading("Could not load Colab. Press r to retry.", spinning=False)
         self.notify(f"Refresh failed: {type(e).__name__}: {e}.", severity="error", timeout=POLL_SECONDS, markup=False)
 
     # Selection and actions.
@@ -660,8 +700,8 @@ class Dashboard(App):
         await super().on_event(event)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
-        """Runtime keys work only on the dashboard, where you can see the runtime they act on."""
-        if action in {"stop", "restart_kernel", "ssh", "history"} and self.screen is not self.screen_stack[0]:
+        """Runtime keys work only on the dashboard, once the first poll has landed."""
+        if action in {"stop", "restart_kernel", "ssh", "history"} and (self.snapshot is None or self.screen is not self.screen_stack[0]):
             return False
         return True
 
