@@ -267,7 +267,7 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(2)]
         assert [r[:2] + r[3:] for r in rows] == [  # all but Started, which is local time
             ["train", "G4", "1h00m", "≈10.0", "running"],
-            ["old", "G4", "≤1h00m", "≤10.0", "gone"],
+            ["old", "G4", "≤1h00m", "≈10.0", "gone"],  # a learned rate: no bound, though the time is one
         ]
 
 
@@ -286,19 +286,44 @@ async def test_the_activity_panel_shows_history_without_code(isolated, tmp_path)
 
 
 async def test_estimates_and_upper_bounds_are_marked_and_spend_is_rate_times_time(isolated):
-    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤."""
+    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤.
+    An estimated rate over a bound is still an estimate: a split can be off either way."""
     t4 = assignment("gpu-t4-s-def", "T4")
     colab = StubColab([T4, t4], {T4["endpoint"]: status(), t4["endpoint"]: status()}, {}, rate=3.68)
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         up = app.snapshot.taken_at - status().started  # untracked: billed since VM boot at most
-        spent = f"≤{1.84 * up.total_seconds() / 3600:.1f}"
+        spent = f"≈{1.84 * up.total_seconds() / 3600:.1f}"
         table = app.query_one(Runtimes)
         cells = {column: str(table.get_row_at(0)[i]) for i, column in enumerate(table.columns)}
         assert (cells["CU/hr"], cells["Spent"], cells["Up"][0]) == ("≈1.84", spent, "≤")
         facts = str(app.query_one(RuntimePanel).query_one(".facts").render())
         assert f"spent {spent}  at ≈1.84/hr" in facts and "up ≤" in facts
+
+
+def cells(table, row):
+    return {column: str(value) for column, value in zip(table.columns, table.get_row_at(row))}
+
+
+@pytest.mark.parametrize(
+    "rate,count,shown",
+    [
+        (16.81, 2, ("?", "?")),  # the account was read before another runtime stopped
+        (0.0, 0, ("?", "?")),  # ...or before this one started
+        (0.0, 1, ("0.00", "≤0.0")),  # both reads agree: a runtime that costs nothing
+    ],
+)
+async def test_a_rate_is_exact_only_when_both_reads_cover_the_same_runtimes(isolated, rate, count, shown):
+    colab = StubColab([T4], {T4["endpoint"]: status()}, {}, rate=rate)
+    colab.ccu_info = lambda: ccu(rate, count)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        row = cells(app.query_one(Runtimes), 0)
+        assert (row["CU/hr"], row["Spent"]) == shown
+        header = str(app.query_one("#usage-text").render())
+        assert "nothing running" not in header and f"{rate:.2f} an hour" in header  # a runtime is listed
 
 
 async def test_a_failed_reading_is_kept_as_a_gap(isolated):
@@ -844,7 +869,7 @@ async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_draw
 def test_a_large_balance_on_one_cpu_runtime_still_draws():
     """The runway bound only keeps the end date inside a datetime; a real account never reaches it."""
     a = Account.parse("me@example.com", {"currentBalance": 500_000, "consumptionRateHourly": 0.07, "assignmentsCount": 1})
-    assert "until" in account_text(a, NOW, None).plain
+    assert "until" in account_text(Snapshot(NOW, a, [], History({})), None).plain
 
 
 # Fuzz: any value Colab could put at any place in a reply either fails its parse or draws.
@@ -912,8 +937,9 @@ def test_every_value_that_parses_draws(data):
         assert type(account.email) is str and all(type(n) is str for n in account.eligible_gpus + account.eligible_tpus)
         assert all(type(n) in (int, float) and math.isfinite(n) for n in (account.balance, account.rate_hourly))
         assert is_whole(account.assignments_count)
-        account_text(account, NOW, None)
-        list(HistoryScreen(Snapshot(NOW, account, runtimes or [], History({})), RateBook(Path("/nonexistent/rates.json"))).compose())
+        s = Snapshot(NOW, account, runtimes or [], History({}))
+        account_text(s, None)
+        list(HistoryScreen(s, RateBook(Path("/nonexistent/rates.json"))).compose())
     if reading:
         assert all(is_whole(n) for n in (reading.memory_total, reading.memory_free, reading.disk_total, reading.disk_used))
         assert all(type(g.name) is str and (g.utilization is None or is_fraction(g.utilization)) for g in reading.gpus)

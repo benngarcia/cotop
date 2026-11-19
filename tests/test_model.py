@@ -10,6 +10,7 @@ from cotop.model import (
     Account,
     History,
     Basis,
+    Rate,
     RateBook,
     Resources,
     Samples,
@@ -256,6 +257,24 @@ def test_billing_starts_at_assignment_not_vm_boot(tmp_path):
     assert browser.billed_for(NOW) == (status().uptime(NOW), False)  # VM boot: an upper bound
 
 
+def test_a_read_that_straddles_a_start_or_stop_gives_no_exact_rate(tmp_path):
+    """The count says the account's rate covers other runtimes than the ones listed."""
+    [t4] = runtimes = runtimes_from([T4], {}, {})
+    straddling = [snapshot(runtimes, 16.81, count=2), snapshot(runtimes, 0.0, count=0)]
+    assert [RateBook(tmp_path / "r.json").rate(t4, s) for s in straddling] == [Rate(None, Basis.UNKNOWN)] * 2
+    (tmp_path / "r.json").write_text('{"T4/STANDARD": 1.84}')
+    assert [RateBook(tmp_path / "r.json").rate(t4, s) for s in straddling] == [Rate(1.84, Basis.LEARNED)] * 2
+
+
+def test_spend_is_an_upper_bound_only_when_rate_and_time_both_are():
+    since_boot, since_assignment = (timedelta(hours=2), False), (timedelta(hours=2), True)
+    assert Rate(1.5, Basis.REPORTED).spend(since_boot) == (3.0, "≤")
+    assert Rate(1.5, Basis.REPORTED).spend(since_assignment) == (3.0, "≈")  # billing may start at VM boot
+    assert Rate(1.5, Basis.LEARNED).spend(since_boot) == (3.0, "≈")  # a learned rate can be low
+    assert Rate(0.0, Basis.REPORTED).spend(since_boot) == (0.0, "≤")
+    assert Rate(None, Basis.UNKNOWN).spend(since_boot) is None
+
+
 def test_rate_book_skips_reads_that_straddle_a_start_or_stop(tmp_path):
     book = RateBook(tmp_path / "r.json")
     book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 11.89, count=2))
@@ -272,9 +291,9 @@ def test_past_session_is_live_only_while_its_endpoint_is_assigned(tmp_path):
         + '{"timestamp": "2026-11-17T19:30:00+00:00", "event_type": "session_terminated", "reason": "pruned"}\n'
     )
     a, b, c = History.load(tmp_path).past_sessions()
-    assert a.lasted(NOW, {"live-ep"}) == (timedelta(hours=1), "")
+    assert a.lasted(NOW, {"live-ep"}) == (timedelta(hours=1), True)
     assert b.lasted(NOW, {"live-ep"}) is None  # reclaimed without the CLI noticing
-    assert c.lasted(NOW, {"live-ep"}) == (timedelta(minutes=30), "≤")
+    assert c.lasted(NOW, {"live-ep"}) == (timedelta(minutes=30), False)  # pruned: an upper bound
 
 
 def test_idle_counts_only_since_assignment(tmp_path):

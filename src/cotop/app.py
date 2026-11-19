@@ -26,6 +26,7 @@ from cotop.model import (
     RateBook,
     Resources,
     Runtime,
+    Rate,
     Samples,
     Snapshot,
     UsageLog,
@@ -84,18 +85,21 @@ class Usage(Vertical):
 
     def show(self, s: Snapshot, log: UsageLog) -> None:
         self.border_title = s.account.email
-        self.query_one("#usage-text", Static).update(account_text(s.account, s.taken_at, log.burn(s.taken_at)))
+        self.query_one("#usage-text", Static).update(account_text(s, log.burn(s.taken_at)))
         self.query_one("#usage-graph", Graph).refresh()
         self.border_subtitle = "rate over 24h"
 
 
-def account_text(a: Account, now: datetime, burn: float | None) -> Text:
+def account_text(s: Snapshot, burn: float | None) -> Text:
     """What is left, how long it lasts, and what was really charged."""
+    a, now = s.account, s.taken_at
     runway = a.runway
     low = runway is not None and runway < LOW_RUNWAY
     left = Text.assemble((f"{a.balance:,.2f}", f"bold {RED}" if low else "bold"), (" compute units left", RED if low else ""))
-    if runway is None:
+    if not (s.runtimes or a.assignments_count or a.rate_hourly):  # only when both reads say so
         pace = Text("nothing running", style=DIM)
+    elif runway is None:
+        pace = Text(f"{a.rate_hourly:.2f} an hour")
     else:
         pace = Text.assemble(
             f"{a.rate_hourly:.2f} an hour, lasts ",
@@ -144,12 +148,10 @@ class RuntimePanel(Vertical):
             billing = ", still billing" if concern.startswith("idle") else ""
             lines.append(Text(concern + billing, style=ORANGE))
         if billed:
-            duration, exact = billed
             since = f"since {clock(r.assigned_at)}" if r.assigned_at else "since VM boot"
-            lines.append(Text.assemble(("up ", DIM), ("" if exact else "≤") + fmt_duration(duration), (f"  {since}", DIM)))
-            if rate.hourly:
-                spent = rate.hourly * duration.total_seconds() / 3600
-                lines.append(Text.assemble(("spent ", DIM), f"{'≈' if exact else '≤'}{spent:.1f}", (f"  at {rate_text(rate)}/hr", DIM)))
+            lines.append(Text.assemble(("up ", DIM), time_text(billed), (f"  {since}", DIM)))
+            if rate.hourly is not None:
+                lines.append(Text.assemble(("spent ", DIM), spend_text(rate, billed), (f"  at {rate_text(rate)}/hr", DIM)))
         if r.status:
             lines.append(Text.assemble(("clients ", DIM), str(r.status.clients)))
         self.query_one(".facts", Static).update(Text("\n").join(lines))
@@ -194,10 +196,22 @@ def meters(res: Resources | None, width: int) -> Text:
     )
 
 
-def rate_text(rate) -> str:
+def rate_text(rate: Rate) -> str:
     if rate.hourly is None:
         return "?"
     return f"{'' if rate.exact else '≈'}{rate.hourly:.2f}"
+
+
+def spend_text(rate: Rate, billed: tuple[timedelta, bool]) -> str:
+    match rate.spend(billed):
+        case (spent, mark):
+            return f"{mark}{spent:.1f}"
+    return "?"
+
+
+def time_text(billed: tuple[timedelta, bool]) -> str:
+    duration, exact = billed
+    return ("" if exact else "≤") + fmt_duration(duration)
 
 
 def state_text(r: Runtime, now: datetime, latest: Resources | None) -> Text:
@@ -252,18 +266,12 @@ class Runtimes(DataTable):
         for r in ordered:
             rate = rate_of[r.endpoint]
             billed = r.billed_for(now)
-            up, spent = "?", "?"
-            if billed:
-                duration, exact = billed
-                up = ("" if exact else "≤") + fmt_duration(duration)
-                if rate.hourly:
-                    spent = f"{'≈' if exact else '≤'}{rate.hourly * duration.total_seconds() / 3600:.1f}"
             cells = {
                 "Name": Text(r.label, style="" if r.name else DIM),
                 "Hardware": r.hardware + (" hi-RAM" if r.shape == "HIGH_RAM" else ""),
                 "CU/hr": rate_text(rate),
-                "Spent": spent,
-                "Up": up,
+                "Spent": spend_text(rate, billed) if billed else "?",
+                "Up": time_text(billed) if billed else "?",
                 "State": state_text(r, now, samples.latest(r.endpoint)),
             }
             for column, value in cells.items():
@@ -348,20 +356,14 @@ class HistoryScreen(Screen):
         table.add_columns("Name", "Hardware", "Started", "Lasted", "CU", "Ended")
         live = {r.endpoint for r in s.runtimes}
         for p in s.history.past_sessions():
-            rate = self.rates.rates.get(p.kind)
-            lasted, cost = "?", "?"
-            if run := p.lasted(s.taken_at, live):
-                duration, bound = run
-                lasted = bound + fmt_duration(duration)
-                if rate:
-                    cost = f"{bound or '≈'}{rate * duration.total_seconds() / 3600:.1f}"
+            run = p.lasted(s.taken_at, live)
             ended = ENDINGS.get(p.reason, p.reason) if p.reason else ("running" if p.endpoint in live else "unknown")
             table.add_row(
                 p.name,
                 p.kind.replace("/STANDARD", "").replace("/HIGH_RAM", " hi-RAM"),
                 f"{p.created.astimezone():%b %-d %H:%M}",
-                lasted,
-                cost,
+                time_text(run) if run else "?",
+                spend_text(self.rates.learned(p.kind), run) if run else "?",
                 ended,
             )
 

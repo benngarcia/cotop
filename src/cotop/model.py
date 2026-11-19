@@ -361,6 +361,14 @@ class Rate:
     def exact(self) -> bool:
         return self.basis is Basis.REPORTED
 
+    def spend(self, billed: tuple[timedelta, bool]) -> tuple[float, str] | None:
+        """Compute units at this rate over billed time, and its mark: "≤" only when both are bounds,
+        an exact rate over time since VM boot; "≈" otherwise, since billing may start before assignment."""
+        if self.hourly is None:
+            return None
+        time, exact_time = billed
+        return self.hourly * (time / timedelta(hours=1)), "≤" if self.exact and not exact_time else "≈"
+
 
 class RateBook:
     """Hourly compute-unit rates per hardware kind, learned from the account total.
@@ -390,13 +398,15 @@ class RateBook:
             self.unsaved = write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
     def rate(self, runtime: Runtime, s: Snapshot) -> Rate:
-        if len(s.runtimes) == 1:
+        """The account's total, split if it can be; a read that straddled a start or stop never splits."""
+        if s.consistent and len(s.runtimes) == 1:
             return Rate(s.account.rate_hourly, Basis.REPORTED)
-        if len({r.kind for r in s.runtimes}) == 1:
+        if s.consistent and len({r.kind for r in s.runtimes}) == 1:
             return Rate(s.account.rate_hourly / len(s.runtimes), Basis.SPLIT)
-        if runtime.kind in self.rates:
-            return Rate(self.rates[runtime.kind], Basis.LEARNED)
-        return Rate(None, Basis.UNKNOWN)
+        return self.learned(runtime.kind)
+
+    def learned(self, kind: str) -> Rate:
+        return Rate(self.rates[kind], Basis.LEARNED) if kind in self.rates else Rate(None, Basis.UNKNOWN)
 
 
 class UsageLog:
@@ -471,13 +481,13 @@ class PastSession:
     ended: datetime | None  # None: no terminate event; live, or reclaimed without the CLI noticing
     reason: str | None
 
-    def lasted(self, now: datetime, live: set[str]) -> tuple[timedelta, str] | None:
-        """How long it ran, and "" if exact, "≤" if an upper bound; None if unknown."""
+    def lasted(self, now: datetime, live: set[str]) -> tuple[timedelta, bool] | None:
+        """How long it ran, and whether that is exact or only an upper bound; None if unknown."""
         if self.ended:
             # "pruned" is when the CLI noticed the VM was gone, not when it went
-            return self.ended - self.created, "≤" if self.reason == "pruned" else ""
+            return self.ended - self.created, self.reason != "pruned"
         if self.endpoint in live:
-            return now - self.created, ""
+            return now - self.created, True
         return None
 
 
