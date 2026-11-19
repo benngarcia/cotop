@@ -91,7 +91,7 @@ def write_atomic(path: Path, text: str) -> OSError | None:
         with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete_on_close=False) as f:
             f.write(text)
             f.close()
-            os.replace(f.name, path)  # the temp file is gone, so leaving the block deletes nothing; on failure it deletes it
+            os.replace(f.name, path)  # if this or the write fails, leaving the block deletes the temp file
     except OSError as e:
         return e
     return None
@@ -444,7 +444,6 @@ class UsageLog:
         return out
 
 
-
 def _sample(line: str) -> tuple[datetime, float, float] | None:
     """One usage line; a damaged one, or one an older cotop wrote with a string in it, is skipped."""
     try:
@@ -454,6 +453,7 @@ def _sample(line: str) -> tuple[datetime, float, float] | None:
     except ValueError:
         pass
     return None
+
 
 @dataclass(frozen=True)
 class PastSession:
