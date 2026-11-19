@@ -403,17 +403,31 @@ async def test_a_cpu_runtime_keeps_its_ram_graph_when_its_reading_goes_stale(iso
 
 async def test_one_slow_runtime_holds_back_only_its_own_readings(isolated, monkeypatch):
     """Each tick leaves one entry per runtime: a reading, or a gap while the last read is still out."""
-    monkeypatch.setattr("cotop.app.SAMPLE_SECONDS", 0.1)
+    monkeypatch.setattr("cotop.app.SAMPLE_SECONDS", 3600)  # the test ticks by hand
     colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
-    colab.resources = lambda r: time.sleep(0.35) or resources(0.5) if r.endpoint == T4["endpoint"] else resources(1.0)
+    slow_may_return = threading.Event()
+    colab.resources = lambda r: (
+        (slow_may_return.wait(5), resources(0.5))[1] if r.endpoint == T4["endpoint"] else resources(1.0)
+    )
     app = Dashboard(colab, isolated)
+
+    async def until_returned(endpoint):
+        for _ in range(500):
+            if endpoint not in app.reads_out:
+                return
+            await pilot.pause(0.01)
+        raise AssertionError(f"the read of {endpoint} never returned")
+
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
-        await pilot.pause(1.5)
+        for _ in range(5):  # the slow read stays out for all five ticks
+            app.action_sample()
+            await until_returned(G4["endpoint"])
+        slow_may_return.set()
+        await until_returned(T4["endpoint"])
         fast, slow = (list(app.samples.readings[a["endpoint"]]) for a in (G4, T4))
-    assert len(fast) >= 8 and all(r.gpu_utilization == 1.0 for _, r in fast)
-    assert abs(len(fast) - len(slow)) <= 1
-    assert {type(r).__name__ for _, r in slow} == {"Resources", "TimeoutError"}
+    assert [r.gpu_utilization for _, r in fast] == [1.0] * 5
+    assert [type(r).__name__ for _, r in slow] == ["TimeoutError"] * 4 + ["Resources"]
     times = [at for at, _ in slow]
     assert times == sorted(times)
 
