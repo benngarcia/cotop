@@ -171,7 +171,6 @@ def utilization(value) -> float | None:
 class Resources:
     """One reading of a runtime's memory, disk and GPUs; cotop takes one every two seconds."""
 
-    at: datetime
     memory_total: int
     memory_free: int
     disk_total: int
@@ -179,14 +178,13 @@ class Resources:
     gpus: tuple[Gpu, ...]
 
     @classmethod
-    def parse(cls, at: datetime, resources: dict) -> Resources:
+    def parse(cls, resources: dict) -> Resources:
         """Sizes are optional and default to 0, as in Colab's own client (colab-vscode);
         a missing utilization stays None, so it draws as a gap rather than an idle GPU.
         A size that is there must be a whole number: a null or a string fails the reading."""
         memory = resources.get("memory", {})
         disks = [d.get("filesystem", {}) for d in resources.get("disks", [])]
         return cls(
-            at=at,
             memory_total=whole(memory.get("totalBytes", 0)),
             memory_free=whole(memory.get("freeBytes", 0)),
             disk_total=sum(whole(d.get("totalBytes", 0)) for d in disks),
@@ -215,25 +213,44 @@ class Resources:
 
 
 class Samples:
-    """Recent resource readings per runtime. A failed reading is a gap (None), never a zero."""
+    """Recent resource readings per runtime. A failed read is a gap, kept as the error that made it, never a zero.
+
+    Each entry's time is when the reading reached the dashboard, so entries are in order.
+    """
 
     KEEP = 900  # 30 minutes at one reading every two seconds
+    FRESH = timedelta(seconds=10)  # five ticks: a late read or two keeps the meters, a dead endpoint is named within 10 s
 
     def __init__(self):
-        self.readings: dict[str, deque[tuple[datetime, Resources | None]]] = {}
+        self.readings: dict[str, deque[tuple[datetime, Resources | Exception]]] = {}
 
-    def add(self, endpoint: str, at: datetime, reading: Resources | None) -> None:
+    def add(self, endpoint: str, at: datetime, reading: Resources | Exception) -> None:
         self.readings.setdefault(endpoint, deque(maxlen=self.KEEP)).append((at, reading))
 
-    def latest(self, endpoint: str) -> Resources | None:
-        for _, reading in reversed(self.readings.get(endpoint, ())):
-            if reading is not None:
+    def latest(self, endpoint: str, now: datetime) -> Resources | None:
+        """The newest reading, if it is under FRESH old: an older one is what the runtime was doing, not what it does."""
+        for at, reading in reversed(self.readings.get(endpoint, ())):
+            if now - at > self.FRESH:
+                return None
+            if isinstance(reading, Resources):
                 return reading
         return None
 
+    def newest(self, endpoint: str) -> Resources | None:
+        """The newest reading however old: what hardware the runtime has, never what it is doing."""
+        return next((r for _, r in reversed(self.readings.get(endpoint, ())) if isinstance(r, Resources)), None)
+
+    def failure(self, endpoint: str, now: datetime) -> Exception | None:
+        """Why there is no fresh reading, once reads have failed for FRESH; None while one is fresh or it is too soon to say."""
+        readings = self.readings.get(endpoint)
+        if not readings or now - readings[0][0] < self.FRESH or self.latest(endpoint, now) is not None:
+            return None
+        newest = readings[-1][1]
+        return newest if isinstance(newest, Exception) else None
+
     def series(self, endpoint: str, metric) -> list[float | None]:
         """metric(reading) for each reading, oldest first; gaps, and readings it has no value for, are None."""
-        return [metric(r) if r is not None else None for _, r in self.readings.get(endpoint, ())]
+        return [metric(r) if isinstance(r, Resources) else None for _, r in self.readings.get(endpoint, ())]
 
     def time_of(self, endpoint: str, n: int) -> datetime | None:
         """When the n-th newest reading was taken, or the oldest if there are fewer."""
@@ -430,9 +447,13 @@ class UsageLog:
 
     Colab settles the balance in steps a few minutes apart, so burn is measured
     between the first and last step inside the window, not between polls.
+    An unchanged sample is written again every REPEAT, so the log also says
+    when cotop was watching: a longer silence is time nobody saw.
     """
 
     KEEP = timedelta(days=7)
+    REPEAT = timedelta(minutes=5)
+    WATCHED = 2 * REPEAT  # how long a sample vouches for the rate: its repeat, with room for polls failing a few minutes
 
     def __init__(self, path: Path):
         self.path = path
@@ -444,11 +465,11 @@ class UsageLog:
     def record(self, now: datetime, balance: float, rate: float) -> None:
         """Only numbers go in: one string here would break every burn for the next hour, even after a restart."""
         balance, rate = number(balance), number(rate)
-        changed = not self.samples or self.samples[-1][1:] != (balance, rate)
-        if changed:
+        due = not self.samples or self.samples[-1][1:] != (balance, rate) or now - self.samples[-1][0] >= self.REPEAT
+        if due:
             self.samples.append((now, balance, rate))
             self.samples = [s for s in self.samples if now - s[0] <= self.KEEP]
-        if changed or self.unsaved:  # retried until the disk takes it
+        if due or self.unsaved:  # retried until the disk takes it
             self.unsaved = write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
 
     def burn(self, now: datetime, window: timedelta = timedelta(hours=1)) -> float | None:
@@ -472,14 +493,14 @@ class UsageLog:
         return charged / hours if hours >= 0.1 else None
 
     def rate_series(self, now: datetime, columns: int, window: timedelta = timedelta(hours=24)) -> list[float | None]:
-        """The hourly rate across the window in equal steps, oldest first; None before the first sample."""
-        out, i, rate = [], 0, None
+        """The hourly rate across the window in equal steps, oldest first; None where cotop was not watching."""
+        out, i, last = [], 0, None
         for c in range(columns):
             at = now - window + window * (c + 1) / columns
             while i < len(self.samples) and self.samples[i][0] <= at:
-                rate = self.samples[i][2]
+                last = self.samples[i]
                 i += 1
-            out.append(rate)
+            out.append(last[2] if last and at - last[0] <= self.WATCHED else None)
         return out
 
 
