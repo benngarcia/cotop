@@ -1,4 +1,4 @@
-from cotop.widgets import braille_rows
+from cotop.widgets import braille_rows, sparkline
 
 
 def test_braille_area_graph():
@@ -9,3 +9,7 @@ def test_braille_area_graph():
     assert braille_rows([0.5, 0.5], width=1, height=2) == [" ", "⣿"]
     # the newest value is the rightmost dot column; a short series pads with gaps
     assert braille_rows([1.0], width=2, height=1) == [" ⢸"]
+
+
+def test_a_sparkline_gap_is_blank_and_a_zero_is_a_baseline():
+    assert sparkline([None, 0.0], 2).plain == " ▁"

@@ -3,6 +3,7 @@
 import copy
 import json
 import math
+from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -18,7 +19,7 @@ from rich.style import Style
 
 from cotop.widgets import RED, sparkline
 from cotop.model import Account, History, PastSession, RateBook, Resources, Status, parse_json, runtimes_from, utc_now
-from tests.test_model import CPU, FIXTURES, G4, NOW, LOCAL, SECRET_HISTORY, T4, assignment, ccu, resources, status
+from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 
 class StubColab:
@@ -70,6 +71,24 @@ async def settle(app, pilot):
     for _ in range(3):
         await app.workers.wait_for_complete()
         await pilot.pause()
+
+
+def learned(cache, rates):
+    """Rates cotop learned on an earlier run, as RateBook stores them."""
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "rates.json").write_text(json.dumps(rates))
+
+
+def cli_history(directory, **sessions):
+    """The CLI's history directory, one JSONL file per session name, read the way Colab.history reads it."""
+    directory.mkdir()
+    for name, events in sessions.items():
+        (directory / f"{name}.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
+    return History.load(directory)
+
+
+def created(at, endpoint):
+    return {"timestamp": at.isoformat(), "event_type": "session_created", "endpoint": endpoint, "accelerator": "G4", "machine_shape": "STANDARD"}
 
 
 def mixed():
@@ -172,9 +191,37 @@ async def test_stop_needs_a_yes_and_acts_on_the_selected_runtime(isolated):
         )
         await pilot.press("enter")  # Cancel has focus
         await pilot.press("s", "n")
+        await pilot.press("s", "escape")
         await pilot.press("down", "s", "y")
         await settle(app, pilot)
         assert colab.calls == [("stop", T4["endpoint"])]
+
+
+async def test_stop_acts_on_the_row_shown_when_the_table_order_differs_from_colabs(isolated):
+    learned(isolated, {"T4/STANDARD": 1.84, "G4/STANDARD": 10.05})
+    colab = StubColab([T4, G4], {T4["endpoint"]: status(), G4["endpoint"]: status()}, {}, rate=11.89)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        assert str(app.query_one(Runtimes).get_row_at(0)[0]) == "train"  # the G4 sorts first: it costs more
+        await pilot.press("s", "y")
+        await settle(app, pilot)
+        assert colab.calls == [("stop", G4["endpoint"])]
+
+
+async def test_stop_acts_on_the_runtime_the_prompt_named_even_if_the_list_changes(isolated):
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("s")
+        assert "Stop train (G4)?" in str(app.screen.query_one("Label").render())
+        colab._assignments = [T4]  # train ends while the prompt is open
+        app.action_refresh()
+        await settle(app, pilot)
+        await pilot.press("y")
+        await settle(app, pilot)
+        assert colab.calls == [("stop", G4["endpoint"])]  # which Colab.stop then refuses as gone
 
 
 async def test_kernel_and_ssh_actions_refuse_untracked_runtimes(isolated):
@@ -198,6 +245,69 @@ async def test_history_screen_opens_and_closes(isolated):
         await pilot.press("escape")
         await pilot.pause()
         assert app.screen is app.screen_stack[0]
+
+
+async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated, tmp_path):
+    learned(isolated, {"G4/STANDARD": 10.0})
+    now = utc_now()
+    pruned = {"timestamp": (now - timedelta(hours=4)).isoformat(), "event_type": "session_terminated", "reason": "pruned"}
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.0)
+    history = cli_history(
+        tmp_path / "history",
+        train=[created(now - timedelta(hours=1), G4["endpoint"])],
+        old=[created(now - timedelta(hours=5), "gone"), pruned],
+    )
+    colab.history = lambda: history
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("h")
+        await pilot.pause()
+        table = app.screen.query_one("DataTable")
+        rows = [[str(c) for c in table.get_row_at(i)] for i in range(2)]
+        assert [r[:2] + r[3:] for r in rows] == [  # all but Started, which is local time
+            ["train", "G4", "1h00m", "≈10.0", "running"],
+            ["old", "G4", "≤1h00m", "≤10.0", "gone"],
+        ]
+
+
+async def test_the_activity_panel_shows_history_without_code(isolated, tmp_path):
+    """SECURITY.md: from the CLI's history, cotop never shows code, outputs or prompt replies."""
+    execution = {"timestamp": utc_now().isoformat(), "event_type": "execution", "cell_index": 3, "code": "SECRET_CODE", "outputs": ["SECRET_OUT"]}
+    reply = {"timestamp": utc_now().isoformat(), "event_type": "input_reply", "value": "SECRET_PASSWORD"}
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    history = cli_history(tmp_path / "history", train=[execution, reply])
+    colab.history = lambda: history
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        activity = str(app.query_one(RuntimePanel).query_one(".activity").render())
+        assert "exec cell 3" in activity and "input_reply" in activity and "SECRET" not in activity
+
+
+async def test_estimates_and_upper_bounds_are_marked_and_spend_is_rate_times_time(isolated):
+    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤."""
+    t4 = assignment("gpu-t4-s-def", "T4")
+    colab = StubColab([T4, t4], {T4["endpoint"]: status(), t4["endpoint"]: status()}, {}, rate=3.68)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        up = app.snapshot.taken_at - status().started  # untracked: billed since VM boot at most
+        spent = f"≤{1.84 * up.total_seconds() / 3600:.1f}"
+        table = app.query_one(Runtimes)
+        cells = {column: str(table.get_row_at(0)[i]) for i, column in enumerate(table.columns)}
+        assert (cells["CU/hr"], cells["Spent"], cells["Up"][0]) == ("≈1.84", spent, "≤")
+        facts = str(app.query_one(RuntimePanel).query_one(".facts").render())
+        assert f"spent {spent}  at ≈1.84/hr" in facts and "up ≤" in facts
+
+
+async def test_a_failed_reading_is_kept_as_a_gap(isolated):
+    app = Dashboard(StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05), isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.add_readings(utc_now(), {G4["endpoint"]: resources(0.5)})
+        app.add_readings(utc_now(), {G4["endpoint"]: None})
+        assert app.samples.series(G4["endpoint"], lambda r: r.gpu_utilization)[-2:] == [0.5, None]
 
 
 async def test_selection_survives_the_runtime_list_changing(isolated):
