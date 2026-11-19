@@ -10,8 +10,8 @@ from rich.color import Color as RichColor
 from rich.style import Style
 
 from cotop.widgets import RED
-from cotop.model import History, utc_now
-from tests.test_model import CPU, G4, LOCAL, T4, assignment, ccu, resources, status
+from cotop.model import History, PastSession, utc_now
+from tests.test_model import CPU, G4, LOCAL, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 
 class StubColab:
@@ -125,6 +125,45 @@ async def test_failed_refresh_keeps_the_last_data(isolated):
         assert app.query_one(Runtimes).row_count == 3
 
 
+async def test_an_error_message_is_shown_as_text_not_markup(isolated):
+    """Exception text such as "[/]" is not Textual markup; parsing it as markup exits cotop when the toast draws."""
+    colab = mixed()
+    colab.ccu_info = lambda: (_ for _ in ()).throw(ValueError("unexpected '[/]' in the reply"))
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46), notifications=True) as pilot:
+        await settle(app, pilot)
+        await pilot.pause(0.2)
+        assert any("ValueError: unexpected '[/]' in the reply." in str(n.message) for n in app._notifications)
+        assert app.is_running
+
+
+def secret_colab(tmp_path):
+    """One runtime whose CLI history holds code, outputs and a stdin reply, all canaries."""
+    (tmp_path / "history").mkdir()
+    (tmp_path / "history" / "train.jsonl").write_text(SECRET_HISTORY)
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    colab.history = lambda: History.load(tmp_path / "history")
+    return colab
+
+
+async def test_a_crash_report_never_shows_cli_history(isolated, tmp_path, monkeypatch, capfd):
+    """Textual prints every frame's locals when cotop crashes; the snapshot in them must hold no code, outputs or stdin."""
+
+    def crash(*_):
+        raise RuntimeError("planted")
+
+    monkeypatch.setattr(PastSession, "lasted", crash)  # a bug in a screen, outside any error boundary
+    app = Dashboard(secret_colab(tmp_path), isolated)
+    with pytest.raises(RuntimeError, match="planted"):
+        async with app.run_test(size=(150, 46)) as pilot:
+            await settle(app, pilot)
+            await pilot.press("h")
+            await settle(app, pilot)
+    report = capfd.readouterr().err
+    assert "history=History(" in report  # the report did print the snapshot
+    assert "SECRET" not in report
+
+
 async def test_no_runtimes(isolated):
     app = Dashboard(StubColab([], {}, {}, rate=0), isolated)
     async with app.run_test(size=(150, 46)) as pilot:
@@ -227,14 +266,15 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
 async def test_the_activity_panel_shows_history_without_code(isolated, tmp_path):
     """SECURITY.md: from the CLI's history, cotop never shows code, outputs or prompt replies."""
     execution = {"timestamp": utc_now().isoformat(), "event_type": "execution", "cell_index": 3, "code": "SECRET_CODE", "outputs": ["SECRET_OUT"]}
+    reply = {"timestamp": utc_now().isoformat(), "event_type": "input_reply", "value": "SECRET_PASSWORD"}
     colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    history = cli_history(tmp_path / "history", train=[execution])
+    history = cli_history(tmp_path / "history", train=[execution, reply])
     colab.history = lambda: history
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         activity = str(app.query_one(RuntimePanel).query_one(".activity").render())
-        assert "exec cell 3" in activity and "SECRET" not in activity
+        assert "exec cell 3" in activity and "input_reply" in activity and "SECRET" not in activity
 
 
 async def test_estimates_and_upper_bounds_are_marked_and_spend_is_rate_times_time(isolated):
