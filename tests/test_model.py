@@ -303,6 +303,49 @@ def test_damaged_cache_files_do_not_stop_cotop(tmp_path):
     (tmp_path / "r.json").write_text('{"G4/STANDARD": 10.0')
     assert len(UsageLog(tmp_path / "u.jsonl").samples) == 1
     assert RateBook(tmp_path / "r.json").rates == {}
+    (tmp_path / "r.json").write_text('{"G4/STANDARD": "10.0"}')
+    assert RateBook(tmp_path / "r.json").rates == {}
+
+
+def test_a_balance_that_is_not_a_number_never_reaches_the_usage_log(tmp_path):
+    """0.3.x wrote one string balance, and every burn for the next hour failed, even after a restart."""
+    (tmp_path / "u.jsonl").write_text(
+        '["2026-11-17T21:00:00+00:00", 5230.0, 10.05]\n["2026-11-17T21:05:00+00:00", "5227.43", 10.05]\n'
+        '["2026-11-17T21:06:00+00:00", NaN, 10.05]\n{"balance": 1}\n'
+    )
+    log = UsageLog(tmp_path / "u.jsonl")
+    assert [b for _, b, _ in log.samples] == [5230.0]
+    for balance, rate in (("5227.43", 10.05), (5227.0, None), (True, 10.05)):
+        with pytest.raises(ValueError):
+            log.record(NOW, balance, rate)
+    for minutes, balance in ((10, 5229.0), (20, 5227.3), (30, 5225.6)):
+        log.record(NOW - timedelta(minutes=60 - minutes), balance, 10.05)
+    assert log.burn(NOW) == pytest.approx(10.2)
+
+
+def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_path):
+    (tmp_path / "cache").mkdir()
+    log = UsageLog(tmp_path / "cache" / "u.jsonl")
+    (tmp_path / "cache" / "u.jsonl").mkdir()  # os.replace onto a directory fails
+    log.record(NOW, 100.0, 10.0)
+    assert isinstance(log.unsaved, OSError) and log.samples == [(NOW, 100.0, 10.0)]
+    assert [p.name for p in (tmp_path / "cache").iterdir()] == ["u.jsonl"]
+    (tmp_path / "cache" / "u.jsonl").rmdir()
+    log.record(NOW, 99.0, 10.0)
+    assert log.unsaved is None and len(UsageLog(tmp_path / "cache" / "u.jsonl").samples) == 2
+
+
+def test_whole_numbers_and_zeros_are_numbers():
+    """Over-rejecting blanks a whole reading or refresh, so the plain values JSON sends as ints must pass."""
+    a = Account.parse("me@example.com", {"currentBalance": 5227, "consumptionRateHourly": 0, "assignmentsCount": 0})
+    assert (a.balance, a.rate_hourly, a.eligible_gpus, a.runway) == (5227, 0, (), None)
+    for util in (0, 1, 0.0, 1.0):
+        assert Resources.parse(NOW, {"gpus": [{"gpuUtilization": util}]}).gpu_utilization == util
+    for bad in (True, 85, -0.1, "0.5"):
+        with pytest.raises(ValueError):
+            Resources.parse(NOW, {"gpus": [{"gpuUtilization": bad}]})
+    with pytest.raises(ValueError, match="not a JSON number"):
+        parse_json('{"gpuUtilization": NaN}')
 
 
 def test_history_skips_lines_it_cannot_read(tmp_path):

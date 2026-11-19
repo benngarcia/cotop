@@ -557,8 +557,6 @@ def _event(line: str) -> Event | Created | Terminated | None:
         at = parse_time(e["timestamp"])
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
-    if not at.tzinfo:
-        return None
     match e:
         case {"event_type": "session_created", "endpoint": str(endpoint), "accelerator": str(accelerator), "machine_shape": str(shape)}:
             return Created(at, endpoint, f"{'CPU' if accelerator == 'NONE' else accelerator}/{shape}")
