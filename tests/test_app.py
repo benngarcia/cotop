@@ -12,13 +12,13 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import cotop.colab
-from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, Snapshot, account_text, meters, state_text
+from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, account_text, meters, state_text
 from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
 
 from cotop.widgets import RED, sparkline
-from cotop.model import Account, History, PastSession, RateBook, Resources, Status, parse_json, runtimes_from, utc_now
+from cotop.model import Account, History, PastSession, RateBook, Resources, Snapshot, Status, parse_json, runtimes_from, utc_now
 from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 
@@ -267,7 +267,7 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(2)]
         assert [r[:2] + r[3:] for r in rows] == [  # all but Started, which is local time
             ["train", "G4", "1h00m", "≈10.0", "running"],
-            ["old", "G4", "≤1h00m", "≤10.0", "gone"],
+            ["old", "G4", "≤1h00m", "≈10.0", "gone"],  # a learned rate: no bound, though the time is one
         ]
 
 
@@ -286,19 +286,55 @@ async def test_the_activity_panel_shows_history_without_code(isolated, tmp_path)
 
 
 async def test_estimates_and_upper_bounds_are_marked_and_spend_is_rate_times_time(isolated):
-    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤."""
+    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤.
+    An estimated rate over a bound is still an estimate: a split can be off either way."""
     t4 = assignment("gpu-t4-s-def", "T4")
     colab = StubColab([T4, t4], {T4["endpoint"]: status(), t4["endpoint"]: status()}, {}, rate=3.68)
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         up = app.snapshot.taken_at - status().started  # untracked: billed since VM boot at most
-        spent = f"≤{1.84 * up.total_seconds() / 3600:.1f}"
+        spent = f"≈{1.84 * up.total_seconds() / 3600:.1f}"
         table = app.query_one(Runtimes)
         cells = {column: str(table.get_row_at(0)[i]) for i, column in enumerate(table.columns)}
         assert (cells["CU/hr"], cells["Spent"], cells["Up"][0]) == ("≈1.84", spent, "≤")
         facts = str(app.query_one(RuntimePanel).query_one(".facts").render())
         assert f"spent {spent}  at ≈1.84/hr" in facts and "up ≤" in facts
+
+
+def cells(table, row):
+    return {column: str(value) for column, value in zip(table.columns, table.get_row_at(row))}
+
+
+@pytest.mark.parametrize(
+    "rate,count,shown",
+    [
+        (16.81, 2, ("?", "?")),  # the account was read before another runtime stopped
+        (0.0, 0, ("?", "?")),  # ...or before this one started
+        (0.0, 1, ("0.00", "≤0.0")),  # both reads agree: a runtime that costs nothing
+    ],
+)
+async def test_a_rate_is_exact_only_when_both_reads_cover_the_same_runtimes(isolated, rate, count, shown):
+    colab = StubColab([T4], {T4["endpoint"]: status()}, {}, rate=rate)
+    colab.ccu_info = lambda: ccu(rate, count)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        row = cells(app.query_one(Runtimes), 0)
+        assert (row["CU/hr"], row["Spent"]) == shown
+        header = str(app.query_one("#usage-text").render())
+        assert "nothing running" not in header and f"{rate:.2f} an hour" in header  # a runtime is listed
+
+
+async def test_rows_add_up_to_the_account_rate_and_spend_on_a_learned_rate_is_no_bound(isolated):
+    learned(isolated, {"G4/STANDARD": 5.0, "T4/STANDARD": 1.0})  # learned when both cost less
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    colab.local = {}  # both opened in a browser: billed since VM boot at most
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        rows = [cells(app.query_one(Runtimes), i) for i in range(2)]
+        assert [(r["CU/hr"], r["Spent"][0]) for r in rows] == [("≈9.91", "≈"), ("≈1.98", "≈")]
 
 
 async def test_a_failed_reading_is_kept_as_a_gap(isolated):
@@ -841,10 +877,21 @@ async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_draw
         assert [n.severity for n in app._notifications if "Can't save" in str(n.message)] == ["warning"]
 
 
-def test_a_large_balance_on_one_cpu_runtime_still_draws():
-    """The runway bound only keeps the end date inside a datetime; a real account never reaches it."""
-    a = Account.parse("me@example.com", {"currentBalance": 500_000, "consumptionRateHourly": 0.07, "assignmentsCount": 1})
-    assert "until" in account_text(a, NOW, None).plain
+def test_the_runway_reads_right_from_none_left_to_centuries():
+    def pace(balance, rate):
+        a = Account.parse("me@example.com", {"currentBalance": balance, "consumptionRateHourly": rate, "assignmentsCount": 1})
+        return account_text(Snapshot(NOW, a, [], History({})), None).plain.splitlines()[1]
+
+    def end(hours):
+        return (NOW + timedelta(hours=hours)).astimezone()
+
+    assert pace(100.0, 10.0) == f"10.00 an hour, lasts 10h00m until {end(10):%a %H:%M}"
+    assert pace(5227.43, 1.76) == f"1.76 an hour, lasts 123d18h until {end(5227.43 / 1.76):%b %-d}"  # a weekday would repeat
+    assert pace(-3.5, 1.76) == "1.76 an hour, none left"
+    assert pace(-1e300, 1.0) == "1.00 an hour, none left"
+    assert pace(10.0, 0.0) == "0.00 an hour"
+    assert pace(500_000, 0.07) == "0.07 an hour, lasts over 815 years"  # one CPU runtime
+    assert pace(5227.43, 5e-324) == pace(1e308, 1e-308) == "0.00 an hour, lasts over 1000 years"  # past any date
 
 
 # Fuzz: any value Colab could put at any place in a reply either fails its parse or draws.
@@ -912,8 +959,9 @@ def test_every_value_that_parses_draws(data):
         assert type(account.email) is str and all(type(n) is str for n in account.eligible_gpus + account.eligible_tpus)
         assert all(type(n) in (int, float) and math.isfinite(n) for n in (account.balance, account.rate_hourly))
         assert is_whole(account.assignments_count)
-        account_text(account, NOW, None)
-        list(HistoryScreen(Snapshot(NOW, account, runtimes or [], History({})), RateBook(Path("/nonexistent/rates.json"))).compose())
+        s = Snapshot(NOW, account, runtimes or [], History({}))
+        account_text(s, None)
+        list(HistoryScreen(s, RateBook(Path("/nonexistent/rates.json"))).compose())
     if reading:
         assert all(is_whole(n) for n in (reading.memory_total, reading.memory_free, reading.disk_total, reading.disk_used))
         assert all(type(g.name) is str and (g.utilization is None or is_fraction(g.utilization)) for g in reading.gpus)

@@ -15,11 +15,13 @@ import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
+from itertools import pairwise
 from pathlib import Path
 
 XSSI_PREFIX = ")]}'\n"
 SHAPES = {0: "STANDARD", 1: "HIGH_RAM"}
-LONGEST_RUNWAY = timedelta(days=365 * 1000)  # longer is not a real account, and the end date must stay before year 9999
+LONGEST_RUNWAY = timedelta(days=365 * 1000)  # a near-zero rate is a real account; this keeps its runway a timedelta
 
 
 def parse_json(body: str):
@@ -116,13 +118,10 @@ class Account:
     @classmethod
     def parse(cls, email: str, ccu: dict) -> Account:
         """Numbers stay numbers: colab-vscode reads these as z.number(), so a string is an error, not a value."""
-        balance, rate = number(ccu["currentBalance"]), number(ccu["consumptionRateHourly"])
-        if rate and not abs(balance / rate) <= LONGEST_RUNWAY / timedelta(hours=1):
-            raise ValueError(f"{balance} compute units at {rate} an hour is not an account")
         return cls(
             email=string(email),
-            balance=balance,
-            rate_hourly=rate,
+            balance=number(ccu["currentBalance"]),
+            rate_hourly=number(ccu["consumptionRateHourly"]),
             assignments_count=whole(ccu["assignmentsCount"]),
             eligible_gpus=strings(ccu.get("eligibleGpus", [])),
             eligible_tpus=strings(ccu.get("eligibleTpus", [])),
@@ -130,9 +129,11 @@ class Account:
 
     @property
     def runway(self) -> timedelta | None:
+        """How long the balance lasts at this rate, from none left up to LONGEST_RUNWAY; None while it isn't falling."""
         if self.rate_hourly <= 0:
             return None
-        return timedelta(hours=self.balance / self.rate_hourly)
+        hours = self.balance / self.rate_hourly  # inf for a near-zero rate
+        return timedelta(hours=min(max(hours, 0), LONGEST_RUNWAY / timedelta(hours=1)))
 
 
 @dataclass(frozen=True)
@@ -342,14 +343,31 @@ class Runtime:
         return found
 
 
+class Basis(Enum):
+    """Where a runtime's hourly rate comes from; Colab reports only the account's total."""
+
+    REPORTED = "reported"  # the account's total, and this runtime is the only one
+    SPLIT = "split"  # the total over runtimes all of one kind
+    LEARNED = "learned"  # what this kind cost when it last ran alone, scaled to the total when it can be
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class Rate:
     hourly: float | None
-    basis: str  # reported | split | learned | unknown
+    basis: Basis
 
     @property
     def exact(self) -> bool:
-        return self.basis == "reported"
+        return self.basis is Basis.REPORTED
+
+    def spend(self, billed: tuple[timedelta, bool]) -> tuple[float, str] | None:
+        """Compute units at this rate over billed time, and its mark: "≤" only when both are bounds,
+        an exact rate over time since VM boot; "≈" otherwise, since billing may start before assignment."""
+        if self.hourly is None:
+            return None
+        time, exact_time = billed
+        return self.hourly * (time / timedelta(hours=1)), "≤" if self.exact and not exact_time else "≈"
 
 
 class RateBook:
@@ -363,32 +381,48 @@ class RateBook:
     def __init__(self, path: Path):
         self.path = path
         self.unsaved: OSError | None = None  # why the last change could not be written
+        self.last_read: tuple[set[str], float] | None = None  # the runtimes and total of the last snapshot
         match read_cache(path):
             case dict(rates) if all(is_number(r) for r in rates.values()):
                 self.rates: dict[str, float] = rates
             case _:
                 self.rates = {}
 
-    def observe(self, account: Account, runtimes: list[Runtime]) -> None:
-        kinds = {r.kind for r in runtimes}
-        if len(kinds) != 1 or account.rate_hourly <= 0:
+    def observe(self, s: Snapshot) -> None:
+        """Learn a kind's rate when it runs alone and two polls in a row agree on the runtimes and the total.
+
+        One poll is not enough: a runtime of one kind can stop and one of another start
+        between its two reads, which the count does not show.
+        """
+        read = ({r.endpoint for r in s.runtimes}, s.account.rate_hourly)
+        steady, self.last_read = read == self.last_read, read
+        kinds = {r.kind for r in s.runtimes}
+        if not (steady and s.consistent and len(kinds) == 1 and s.account.rate_hourly > 0):
             return
-        if account.assignments_count != len(runtimes):  # the two reads straddled a start or stop
-            return
-        rate = round(account.rate_hourly / len(runtimes), 4)
+        rate = round(s.account.rate_hourly / len(s.runtimes), 4)
         kind = kinds.pop()
         if self.rates.get(kind) != rate or self.unsaved:  # retried until the disk takes it
             self.rates[kind] = rate
             self.unsaved = write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
-    def rate(self, runtime: Runtime, runtimes: list[Runtime], account: Account) -> Rate:
-        if len(runtimes) == 1:
-            return Rate(account.rate_hourly, "reported")
-        if len({r.kind for r in runtimes}) == 1:
-            return Rate(account.rate_hourly / len(runtimes), "split")
-        if runtime.kind in self.rates:
-            return Rate(self.rates[runtime.kind], "learned")
-        return Rate(None, "unknown")
+    def rate(self, runtime: Runtime, s: Snapshot) -> Rate:
+        """The account's total, split if it can be; a read that straddled a start or stop never splits.
+
+        When every kind running has been learned, mixed kinds split the total in proportion
+        to their learned rates, so the rows add up to what Colab charges now. Otherwise each
+        row shows its kind's learned rate, or none.
+        """
+        total, kinds = s.account.rate_hourly, [r.kind for r in s.runtimes]
+        if s.consistent and len(kinds) == 1:
+            return Rate(total, Basis.REPORTED)
+        if s.consistent and len(set(kinds)) == 1:
+            return Rate(total / len(kinds), Basis.SPLIT)
+        if s.consistent and set(kinds) <= self.rates.keys() and (known := sum(self.rates[k] for k in kinds)) > 0:
+            return Rate(self.rates[runtime.kind] * total / known, Basis.LEARNED)
+        return self.learned(runtime.kind)
+
+    def learned(self, kind: str) -> Rate:
+        return Rate(self.rates[kind], Basis.LEARNED) if kind in self.rates else Rate(None, Basis.UNKNOWN)
 
 
 class UsageLog:
@@ -418,18 +452,24 @@ class UsageLog:
             self.unsaved = write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
 
     def burn(self, now: datetime, window: timedelta = timedelta(hours=1)) -> float | None:
-        """Compute units per hour actually charged within the window."""
+        """Compute units per hour charged within the window: the drops between settled steps, over the time they span.
+
+        A top-up's step counts as no charge, so while one is in the window the figure is a floor.
+        Once no step has come for longer than the longest gap between steps, nothing is being
+        charged, as after a stop, and that time counts too.
+        """
         steps = []
         for t, b, _ in self.samples:
             if now - t <= window and (not steps or steps[-1][1] != b):
                 steps.append((t, b))
-        if len(steps) < 3:  # the first is a baseline, not a settled step
+        settled = steps[1:]  # the first is a baseline, not a settled step
+        gaps = list(pairwise(settled))
+        charged = sum(max(b0 - b1, 0) for (_, b0), (_, b1) in gaps)
+        if not charged:
             return None
-        (t0, b0), (t1, b1) = steps[1], steps[-1]
-        hours = (t1 - t0).total_seconds() / 3600
-        if hours < 0.1 or b1 > b0:  # too short, or a top-up landed
-            return None
-        return (b0 - b1) / hours
+        quiet_from = now - max(t1 - t0 for (t0, _), (t1, _) in gaps)
+        hours = (max(settled[-1][0], quiet_from) - settled[0][0]) / timedelta(hours=1)
+        return charged / hours if hours >= 0.1 else None
 
     def rate_series(self, now: datetime, columns: int, window: timedelta = timedelta(hours=24)) -> list[float | None]:
         """The hourly rate across the window in equal steps, oldest first; None before the first sample."""
@@ -463,13 +503,13 @@ class PastSession:
     ended: datetime | None  # None: no terminate event; live, or reclaimed without the CLI noticing
     reason: str | None
 
-    def lasted(self, now: datetime, live: set[str]) -> tuple[timedelta, str] | None:
-        """How long it ran, and "" if exact, "≤" if an upper bound; None if unknown."""
+    def lasted(self, now: datetime, live: set[str]) -> tuple[timedelta, bool] | None:
+        """How long it ran, and whether that is exact or only an upper bound; None if unknown."""
         if self.ended:
             # "pruned" is when the CLI noticed the VM was gone, not when it went
-            return self.ended - self.created, "≤" if self.reason == "pruned" else ""
+            return self.ended - self.created, self.reason != "pruned"
         if self.endpoint in live:
-            return now - self.created, ""
+            return now - self.created, True
         return None
 
 
@@ -547,6 +587,21 @@ class History:
                         sessions.append(created.session(name, None))
                     created = e
         return sorted(sessions, key=lambda s: s.created, reverse=True)
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """The account and its runtimes as one poll read them, a request apart."""
+
+    taken_at: datetime
+    account: Account
+    runtimes: list[Runtime]
+    history: History
+
+    @property
+    def consistent(self) -> bool:
+        """Whether the account's figures cover the runtimes listed: a start or stop between the reads breaks this."""
+        return self.account.assignments_count == len(self.runtimes)
 
 
 def _event(line: str) -> Event | Created | Terminated | None:
