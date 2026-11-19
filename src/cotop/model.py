@@ -19,8 +19,7 @@ from pathlib import Path
 
 XSSI_PREFIX = ")]}'\n"
 SHAPES = {0: "STANDARD", 1: "HIGH_RAM"}
-VARIANTS = {0: "DEFAULT", 1: "GPU", 2: "TPU"}
-LONGEST_RUNWAY = timedelta(days=365 * 100)  # a balance lasting longer is not a reading of a real account
+LONGEST_RUNWAY = timedelta(days=365 * 1000)  # longer is not a real account, and the end date must stay before year 9999
 
 
 def parse_json(body: str):
@@ -289,7 +288,6 @@ class Runtime:
     endpoint: str
     accelerator: str
     shape: str
-    variant: str
     url: str | None  # None: Colab has not given it a runtime proxy yet
     token: str = field(default="", repr=False)  # runtime proxy token: used for requests, never shown
     name: str | None = None  # the colab CLI's local name, if it made this one
@@ -379,7 +377,7 @@ class RateBook:
             return
         rate = round(account.rate_hourly / len(runtimes), 4)
         kind = kinds.pop()
-        if self.rates.get(kind) != rate:
+        if self.rates.get(kind) != rate or self.unsaved:  # retried until the disk takes it
             self.rates[kind] = rate
             self.unsaved = write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
@@ -412,11 +410,12 @@ class UsageLog:
     def record(self, now: datetime, balance: float, rate: float) -> None:
         """Only numbers go in: one string here would break every burn for the next hour, even after a restart."""
         balance, rate = number(balance), number(rate)
-        if self.samples and self.samples[-1][1:] == (balance, rate):
-            return
-        self.samples.append((now, balance, rate))
-        self.samples = [s for s in self.samples if now - s[0] <= self.KEEP]
-        self.unsaved = write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
+        changed = not self.samples or self.samples[-1][1:] != (balance, rate)
+        if changed:
+            self.samples.append((now, balance, rate))
+            self.samples = [s for s in self.samples if now - s[0] <= self.KEEP]
+        if changed or self.unsaved:  # retried until the disk takes it
+            self.unsaved = write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
 
     def burn(self, now: datetime, window: timedelta = timedelta(hours=1)) -> float | None:
         """Compute units per hour actually charged within the window."""
@@ -597,13 +596,12 @@ def runtimes_from(
         mine = by_endpoint.get(endpoint, {})
         t = status.get(endpoint)
         url, token = runtime_proxy(a) or (None, "")
-        shape, variant = whole(a.get("machineShape", 0)), whole(a.get("variant", 0))
+        shape = whole(a.get("machineShape", 0))  # an int enum in the colab CLI's ListedAssignment
         runtimes.append(
             Runtime(
                 endpoint=endpoint,
                 accelerator=string(a["accelerator"]),
                 shape=SHAPES.get(shape, str(shape)),
-                variant=VARIANTS.get(variant, str(variant)),
                 url=url,
                 token=token,
                 name=mine.get("name"),

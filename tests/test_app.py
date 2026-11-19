@@ -610,6 +610,10 @@ class WireColab(Colab):
         monkeypatch.setattr(cotop.colab.requests, "get", self.proxy_get)
         super().__init__(self)
         self.body = body
+        self.unassigned = []
+
+    def unassign(self, endpoint):  # Google, for stopping a runtime the CLI has no name for
+        self.unassigned.append(endpoint)
 
     @staticmethod
     def reply(value) -> str:
@@ -662,7 +666,8 @@ NAN = WIRE["/api/colab/resources"].replace('"gpuUtilization": 1.0', '"gpuUtiliza
 )
 async def test_wrong_wire_data_becomes_a_gap_a_row_error_or_a_toast(body, keys, shows, isolated, monkeypatch, tmp_path):
     """A value of the wrong type is turned away where it is parsed, into a path that already exists."""
-    app = Dashboard(WireColab(body, monkeypatch, tmp_path), isolated)
+    colab = WireColab(body, monkeypatch, tmp_path)
+    app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         app.action_sample()
@@ -673,6 +678,7 @@ async def test_wrong_wire_data_becomes_a_gap_a_row_error_or_a_toast(body, keys, 
         rows = [[str(c) for c in app.query_one(Runtimes).get_row_at(i)] for i in range(app.query_one(Runtimes).row_count)]
         failed = [str(n.message) for n in app._notifications if str(n.message).startswith("Refresh failed")]
         assert app.is_running
+    assert colab.unassigned == ([G4["endpoint"]] if "s" in keys else [])
     assert {
         "ok": failed == [] and len(rows) == 1 and rows[0][2].endswith("100%") and rows[0][5] != "unreachable",
         "gap": failed == [] and len(rows) == 1 and rows[0][2].endswith("–"),
@@ -722,6 +728,12 @@ async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_draw
         assert app.query_one(Runtimes).row_count == 3
         assert "compute units left" in str(app.query_one("#usage-text").render())
         assert [n.severity for n in app._notifications if "Can't save" in str(n.message)] == ["warning"]
+
+
+def test_a_large_balance_on_one_cpu_runtime_still_draws():
+    """The runway bound only keeps the end date inside a datetime; a real account never reaches it."""
+    a = Account.parse("me@example.com", {"currentBalance": 500_000, "consumptionRateHourly": 0.07, "assignmentsCount": 1})
+    assert "until" in account_text(a, NOW, None).plain
 
 
 # Fuzz: any value Colab could put at any place in a reply either fails its parse or draws.
@@ -801,6 +813,6 @@ def test_every_value_that_parses_draws(data):
         assert health.started.tzinfo and all(k.last_activity.tzinfo for k in health.kernels)
         assert all(type(k.state) is str and is_whole(k.connections) for k in health.kernels)
     for r in runtimes or []:
-        assert all(type(v) is str for v in (r.endpoint, r.accelerator, r.shape, r.variant, r.token)) and (r.url is None or type(r.url) is str)
+        assert all(type(v) is str for v in (r.endpoint, r.accelerator, r.shape, r.token)) and (r.url is None or type(r.url) is str)
         r.concerns(NOW, reading)
         state_text(r, NOW, reading)

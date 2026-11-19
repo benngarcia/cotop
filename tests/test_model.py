@@ -1,5 +1,6 @@
 """Fixtures follow the shapes of real Colab responses; every value is made up."""
 
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -331,8 +332,16 @@ def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_pat
     assert isinstance(log.unsaved, OSError) and log.samples == [(NOW, 100.0, 10.0)]
     assert [p.name for p in (tmp_path / "cache").iterdir()] == ["u.jsonl"]
     (tmp_path / "cache" / "u.jsonl").rmdir()
-    log.record(NOW, 99.0, 10.0)
-    assert log.unsaved is None and len(UsageLog(tmp_path / "cache" / "u.jsonl").samples) == 2
+    log.record(NOW, 100.0, 10.0)  # the same sample: still written once the disk takes it
+    assert log.unsaved is None and len(UsageLog(tmp_path / "cache" / "u.jsonl").samples) == 1
+
+    book = RateBook(tmp_path / "cache" / "r.json")
+    (tmp_path / "cache" / "r.json").mkdir()
+    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    assert isinstance(book.unsaved, OSError)
+    (tmp_path / "cache" / "r.json").rmdir()
+    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    assert book.unsaved is None and RateBook(tmp_path / "cache" / "r.json").rates == {"G4/STANDARD": 10.05}
 
 
 def test_whole_numbers_and_zeros_are_numbers():
@@ -346,6 +355,47 @@ def test_whole_numbers_and_zeros_are_numbers():
             Resources.parse(NOW, {"gpus": [{"gpuUtilization": bad}]})
     with pytest.raises(ValueError, match="not a JSON number"):
         parse_json('{"gpuUtilization": NaN}')
+
+
+def wrong(body: dict, *path, value):
+    body = parse_json(json.dumps(body))
+    node = body
+    for step in path[:-1]:
+        node = node[step]
+    node[path[-1]] = value
+    return body
+
+
+GOOD_CCU = ccu(10.05, 1)
+GOOD_READING = parse_json((FIXTURES / "resources_g4.txt").read_text())
+GOOD_KERNELS = [{"execution_state": "busy", "last_activity": "2026-11-17T21:59:00Z", "connections": 1}]
+
+
+@pytest.mark.parametrize(
+    "parse",
+    [
+        lambda: Account.parse(None, GOOD_CCU),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "assignmentsCount", value=True)),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "assignmentsCount", value=-1)),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "currentBalance", value=float("inf"))),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "currentBalance", value=10**400)),
+        lambda: Account.parse("me@example.com", wrong(GOOD_CCU, "eligibleTpus", value="V6E1")),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "memory", "totalBytes", value=True)),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "disks", 0, "filesystem", "usedBytes", value=-1)),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "gpus", 0, "memoryUsedBytes", value=2**63)),
+        lambda: Resources.parse(NOW, wrong(GOOD_READING, "gpus", 0, "memoryTotalBytes", value=1.5)),
+        lambda: Status.parse({"started": "2026-11-17T20:59:46Z"}, wrong(GOOD_KERNELS, 0, "execution_state", value=None)),
+        lambda: Status.parse({"started": 1763413186}, GOOD_KERNELS),
+        lambda: runtimes_from([wrong(G4, "endpoint", value=7)], {}, {}),
+        lambda: runtimes_from([wrong(G4, "machineShape", value="HIGH_RAM")], {}, {}),
+        lambda: runtimes_from([wrong(G4, "runtimeProxyInfo", "url", value=None)], {}, {}),
+        lambda: runtimes_from([wrong(G4, "runtimeProxyInfo", "token", value=7)], {}, {}),
+    ],
+)
+def test_a_wrong_type_is_turned_away_where_it_is_parsed(parse):
+    """Fixed cases for what the fuzz target finds only on some draws."""
+    with pytest.raises(ValueError):
+        parse()
 
 
 def test_a_runway_too_long_for_a_date_is_not_an_account():
