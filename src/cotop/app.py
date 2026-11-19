@@ -482,6 +482,15 @@ class Dashboard(App):
     def add_readings(self, at: datetime, readings: dict[str, Resources | None]) -> None:
         for endpoint, reading in readings.items():
             self.samples.add(endpoint, at, reading)
+        try:
+            self.show_readings()
+        except Exception:
+            for endpoint in readings:  # keys and resizes redraw only readings that drew
+                self.samples.unread(endpoint)
+            self.show_readings()
+            raise
+
+    def show_readings(self) -> None:
         if self.snapshot:
             self.query_one(RuntimePanel).show_readings()
             self.query_one(Runtimes).show_readings(self.snapshot, self.samples)

@@ -1,5 +1,7 @@
 """The dashboard rendered from fixture payloads, with no network and temp state dirs."""
 
+import dataclasses
+
 import pytest
 
 from cotop.app import Dashboard, RuntimePanel, Runtimes
@@ -156,6 +158,31 @@ async def test_a_snapshot_that_fails_to_draw_is_reported_and_not_kept(isolated):
         await settle(app, pilot)
         assert app.snapshot.account.rate_hourly == 3.52
         assert [str(n.message).split(":")[1] for n in app._notifications] == [" TypeError"]
+        assert app.is_running
+
+
+@pytest.mark.parametrize(
+    "unreadable",
+    [dataclasses.replace(resources(), memory_free=None), resources(util=float("nan"))],  # Colab can send null and NaN
+    ids=["null-size", "nan-utilization"],
+)
+async def test_a_reading_that_fails_to_draw_becomes_a_gap(isolated, unreadable):
+    """Keys, resizes and the graph's next paint redraw the readings kept, so one that cannot be drawn must not stay."""
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {G4["endpoint"]: resources()}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.action_sample()
+        await settle(app, pilot)
+        colab._readings = {G4["endpoint"]: unreadable}
+        app.action_sample()
+        await settle(app, pilot)
+        await pilot.resize_terminal(120, 46)
+        await pilot.press("down")
+        await settle(app, pilot)
+        assert app.samples.latest(G4["endpoint"]) == resources()
+        [error] = [str(n.message) for n in app._notifications]
+        assert error.startswith("Refresh failed: ")
         assert app.is_running
 
 

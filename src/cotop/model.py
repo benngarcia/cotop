@@ -145,6 +145,11 @@ class Samples:
     def add(self, endpoint: str, at: datetime, reading: Resources | None) -> None:
         self.readings.setdefault(endpoint, deque(maxlen=self.KEEP)).append((at, reading))
 
+    def unread(self, endpoint: str) -> None:
+        """Make the newest reading a gap: one that cannot be drawn must not be drawn again."""
+        at, _ = self.readings[endpoint][-1]
+        self.readings[endpoint][-1] = (at, None)
+
     def latest(self, endpoint: str) -> Resources | None:
         for _, reading in reversed(self.readings.get(endpoint, ())):
             if reading is not None:
