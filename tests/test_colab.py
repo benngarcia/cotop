@@ -46,7 +46,7 @@ def runtime_proxy(code=200):
 def test_a_name_counts_only_while_it_still_means_the_same_vm():
     [r] = running([G4], LOCAL)
     assert still_assigned(r, [G4], LOCAL)
-    assert not still_assigned(r, [], LOCAL)  # VM gone: `colab ssh -s` would create a new one
+    assert not still_assigned(r, [], LOCAL)  # VM gone: no named action may run on it
     reused = {"train": {"name": "train", "endpoint": "gpu-g4-new", "running": None}}
     assert not still_assigned(r, [G4], reused)  # name now means another VM
     [untracked] = running([G4], {})

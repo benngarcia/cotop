@@ -140,8 +140,10 @@ last line the command printed to standard output. A line ending in
 The CLI resolves names, not endpoints. Before a named action, cotop reads
 the assignments and the session file again. It acts only if the name still
 points at the same live VM. A name that was reused since the last poll would
-otherwise point at another VM. `colab ssh` also creates a new runtime for a
-name it does not know. For `x`, the check and the shell run in one step on
+otherwise point at another VM. A name that is gone makes `colab ssh -s NAME`
+exit 2 (`session 'NAME' not found.`), but the helper it starts through ssh's
+ProxyCommand (`colab ssh --proxy-mode -s NAME`) creates a runtime for a name it
+can't find, so a name stopped in the same second could still start one. For `x`, the check and the shell run in one step on
 the dashboard's event loop, so no other key or refresh runs between them; the
 dashboard stays frozen while the check reads the assignments. Keys typed
 while it is frozen, and keys the shell left unread, are dropped: they were
