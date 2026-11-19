@@ -17,7 +17,7 @@ import requests
 
 from cotop.colab_cli_calls import Command, Google, colab_argv, named_sessions
 from cotop.colab_cli_calls import sign_in as cli_sign_in
-from cotop.model import History, Resources, Runtime, Status, parse_json, utc_now
+from cotop.model import History, Resources, Runtime, Status, parse_json, runtime_proxy, utc_now
 
 COLAB = "https://colab.research.google.com"
 USERINFO = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -127,13 +127,17 @@ def _proxy_get(url: str, token: str, path: str, timeout: float):
     return parse_json(r.text)
 
 
+class NoProxy(Exception):
+    pass
+
+
 def _runtime_status(assignment: dict) -> Status | Exception:
-    proxy = assignment["runtimeProxyInfo"]
     try:
-        return Status.parse(
-            _proxy_get(proxy["url"], proxy["token"], "/api/status", TIMEOUT),
-            _proxy_get(proxy["url"], proxy["token"], "/api/kernels", TIMEOUT),
-        )
+        match runtime_proxy(assignment):
+            case (url, token):
+                return Status.parse(_proxy_get(url, token, "/api/status", TIMEOUT), _proxy_get(url, token, "/api/kernels", TIMEOUT))
+            case None:
+                return NoProxy("Colab has not given it a runtime proxy yet")
     except Exception as e:  # shown in the runtime's row, never swallowed
         return e
 

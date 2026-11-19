@@ -1,17 +1,25 @@
 """The dashboard rendered from fixture payloads, with no network and temp state dirs."""
 
+import copy
 import json
+import math
 from datetime import timedelta
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from hypothesis import HealthCheck, given, settings
+from hypothesis import strategies as st
 
-from cotop.app import Dashboard, RuntimePanel, Runtimes
+import cotop.colab
+from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, Snapshot, account_text, meters, state_text
+from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
 
-from cotop.widgets import RED
-from cotop.model import History, PastSession, utc_now
-from tests.test_model import CPU, G4, LOCAL, SECRET_HISTORY, T4, assignment, ccu, resources, status
+from cotop.widgets import RED, sparkline
+from cotop.model import Account, History, PastSession, RateBook, Resources, Status, parse_json, runtimes_from, utc_now
+from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 
 class StubColab:
@@ -670,3 +678,252 @@ async def test_a_vanished_selection_stays_on_its_row_and_x_follows_it(isolated):
         await pilot.press("x")
         await settle(app, pilot)
         assert colab.calls == [("ssh", after[2])]
+
+
+# Wire data Colab could send, through the real Colab class: only the HTTP edge is faked.
+
+WIRE = {
+    "ccu": {"currentBalance": 5227.43, "consumptionRateHourly": 10.05, "assignmentsCount": 1, "eligibleGpus": ["H100"], "eligibleTpus": ["V6E1"]},
+    "assignments": {"assignments": [G4]},
+    "/api/status": {"started": "2026-11-17T20:59:46.480319Z", "last_activity": "2026-11-17T21:59:00Z", "kernels": 1, "connections": 1},
+    "/api/kernels": [{"id": "k", "name": "python3", "last_activity": "2026-11-17T21:59:00Z", "execution_state": "busy", "connections": 1}],
+    "/api/colab/resources": (FIXTURES / "resources_g4.txt").read_text(),
+    "sessions": {"train": {"name": "train", "token": "t", "url": G4["runtimeProxyInfo"]["url"], "endpoint": G4["endpoint"], "running": "run(train.py)"}},
+    "history": SECRET_HISTORY,
+}
+
+
+def wire(body: dict, key: str, *path, value):
+    """body with the value at key/path replaced: a dict, or a raw string Colab could send."""
+    out = copy.deepcopy(body)
+    if not path:
+        out[key] = value
+        return out
+    node = out[key] = parse_json(out[key]) if isinstance(out[key], str) else out[key]
+    for step in path[:-1]:
+        node = node[step]
+    node[path[-1]] = value
+    return out
+
+
+class WireColab(Colab):
+    """The real Colab, over fake Google and runtime proxy replies."""
+
+    def __init__(self, body, monkeypatch, tmp_path):
+        cli = tmp_path / "colab-cli"
+        (cli / "history").mkdir(parents=True)
+        (cli / "sessions.json").write_text(json.dumps(body["sessions"]))
+        (cli / "history" / "train.jsonl").write_text(body["history"])
+        monkeypatch.setattr(cotop.colab, "CLI_HOME", cli)
+        monkeypatch.setattr(cotop.colab, "SESSIONS", cli / "sessions.json")
+        monkeypatch.setattr(cotop.colab, "_cli", lambda *a: pytest.fail(f"ran colab {a}"))
+        monkeypatch.setattr(cotop.colab, "colab_argv", lambda *a: pytest.fail(f"built colab {a}"))
+        monkeypatch.setattr(cotop.colab.requests, "get", self.proxy_get)
+        super().__init__(self)
+        self.body = body
+        self.unassigned = []
+
+    def unassign(self, endpoint):  # Google, for stopping a runtime the CLI has no name for
+        self.unassigned.append(endpoint)
+
+    @staticmethod
+    def reply(value) -> str:
+        return value if isinstance(value, str) else ")]}'\n" + json.dumps(value)
+
+    def get(self, url, params, headers, timeout):  # Google, for account calls
+        key = "ccu" if "ccu-info" in url else "assignments" if "assignments" in url else None
+        return self.reply(self.body[key]) if key else self.reply({"email": "me@example.com"})
+
+    def proxy_get(self, url, headers, params, timeout, allow_redirects):
+        path = next(p for p in ("/api/status", "/api/kernels", "/api/colab/resources") if url.endswith(p))
+        return SimpleNamespace(is_redirect=False, raise_for_status=lambda: None, text=self.reply(self.body[path]))
+
+
+NO_PROXY = {k: v for k, v in assignment("gpu-t4-provisioning", "T4").items() if k != "runtimeProxyInfo"}
+NAN = WIRE["/api/colab/resources"].replace('"gpuUtilization": 1.0', '"gpuUtilization": NaN')
+
+
+@pytest.mark.parametrize(
+    "body,keys,shows",
+    [
+        pytest.param(WIRE, (), "ok", id="baseline"),
+        pytest.param(wire(WIRE, "/api/colab/resources", value=NAN), (), "gap", id="res_util_nan"),
+        pytest.param(wire(WIRE, "/api/colab/resources", "gpus", 0, "gpuUtilization", value="0.5"), (), "gap", id="res_util_string"),
+        pytest.param(wire(WIRE, "/api/colab/resources", "gpus", 0, "gpuUtilization", value=85), (), "gap", id="res_util_percent"),
+        pytest.param(wire(WIRE, "/api/colab/resources", "memory", value={"totalBytes": "190000000000", "freeBytes": "180000000000"}), (), "gap", id="res_mem_int64_string"),
+        pytest.param(wire(WIRE, "/api/colab/resources", "disks", 0, "filesystem", "totalBytes", value="250000000000"), (), "gap", id="res_disk_int64_string"),
+        pytest.param(wire(WIRE, "/api/colab/resources", "gpus", 0, "name", value=None), (), "gap", id="res_gpu_name_null"),
+        pytest.param(wire(WIRE, "/api/colab/resources", value=")]}'\n<html>502</html>"), (), "gap", id="res_not_json"),
+        pytest.param(wire(WIRE, "ccu", "consumptionRateHourly", value=None), (), "toast", id="ccu_rate_null"),
+        pytest.param(wire(WIRE, "ccu", "currentBalance", value="5227.43"), (), "toast", id="ccu_balance_string"),
+        pytest.param(wire(WIRE, "ccu", "eligibleGpus", value=None), (), "toast", id="ccu_eligible_null"),
+        pytest.param(wire(WIRE, "ccu", "eligibleGpus", value=[{"name": "H100"}]), ("h",), "toast", id="ccu_eligible_objects"),
+        pytest.param(wire(WIRE, "ccu", value="<html>Sign in</html>"), (), "toast", id="ccu_html_200"),
+        pytest.param(wire(WIRE, "assignments", "assignments", value=[G4, NO_PROXY]), (), "row", id="asg_no_proxyinfo_on_one"),
+        pytest.param(wire(WIRE, "assignments", "assignments", 0, "accelerator", value=None), (), "toast", id="asg_accel_null"),
+        pytest.param(wire(WIRE, "assignments", value={"error": {"code": 500}}), (), "none", id="asg_error_body_200"),
+        pytest.param(wire(WIRE, "/api/status", "started", value="2026-11-17T20:59:46"), (), "row", id="status_naive_started"),
+        pytest.param(wire(WIRE, "/api/kernels", 0, "connections", value=None), (), "row", id="kernels_connections_null"),
+        pytest.param(wire(WIRE, "/api/kernels", value={"message": "Forbidden"}), (), "row", id="kernels_error_dict"),
+        pytest.param(wire(WIRE, "history", value=WIRE["history"].replace('"remote": "/content/out/model.pt"', '"remote": ["a", "b"]')), (), "ok", id="hist_remote_list"),
+        pytest.param(wire(WIRE, "history", value=WIRE["history"].replace('"reason": "user_requested"', '"reason": ["x"]')), ("h",), "ok", id="hist_reason_list"),
+        pytest.param(wire(WIRE, "history", value=WIRE["history"].replace(f'"endpoint": "{G4["endpoint"]}"', '"endpoint": ["x"]')), (), "ok", id="hist_endpoint_list"),
+        pytest.param(wire(WIRE, "history", value="\xff\xfe garbage\n" + WIRE["history"]), (), "ok", id="hist_non_utf8"),
+        pytest.param(wire(WIRE, "sessions", value='{"train": {"name": "train"'), (), "ok", id="sessions_corrupt"),
+        pytest.param(wire(WIRE, "sessions", "other", value={"name": "other", "endpoint": "gpu-x"}), (), "ok", id="sessions_one_bad_entry"),
+        pytest.param(wire(WIRE, "sessions", value="{"), ("R",), "ok", id="sessions_corrupt_then_R"),
+        pytest.param(wire(WIRE, "sessions", value="{"), ("s", "y"), "ok", id="sessions_corrupt_then_s"),
+    ],
+)
+async def test_wrong_wire_data_becomes_a_gap_a_row_error_or_a_toast(body, keys, shows, isolated, monkeypatch, tmp_path):
+    """A value of the wrong type is turned away where it is parsed, into a path that already exists."""
+    colab = WireColab(body, monkeypatch, tmp_path)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.action_sample()
+        await settle(app, pilot)
+        for key in keys:
+            await pilot.press(key)
+            await settle(app, pilot)
+        rows = [[str(c) for c in app.query_one(Runtimes).get_row_at(i)] for i in range(app.query_one(Runtimes).row_count)]
+        failed = [str(n.message) for n in app._notifications if str(n.message).startswith("Refresh failed")]
+        assert app.is_running
+    assert colab.unassigned == ([G4["endpoint"]] if "s" in keys else [])
+    assert {
+        "ok": failed == [] and len(rows) == 1 and rows[0][2].endswith("100%") and rows[0][5] != "unreachable",
+        "gap": failed == [] and len(rows) == 1 and rows[0][2].endswith("–"),
+        "row": failed == [] and bool(rows) and rows[-1][5] == "unreachable",
+        "toast": len(failed) == 1 and rows == [] and not (isolated / "usage.jsonl").exists(),
+        "none": failed == [] and rows == [],
+    }[shows], (rows, failed)
+
+
+class OneBadReading(WireColab):
+    """Two runtimes; once bad is set, the one not selected reports a null freeBytes."""
+
+    bad = False
+
+    def proxy_get(self, url, **kwargs):
+        reply = super().proxy_get(url, **kwargs)
+        if self.bad and "other" in url and url.endswith("/resources"):
+            reply.text = self.reply(wire(WIRE, "/api/colab/resources", "memory", "freeBytes", value=None)["/api/colab/resources"])
+        return reply
+
+
+async def test_a_bad_reading_on_another_runtime_survives_a_resize(isolated, monkeypatch, tmp_path):
+    """A null freeBytes on a runtime that isn't selected used to be kept, then fail the next redraw."""
+    other = assignment("gpu-g4-s-other", "G4")
+    colab = OneBadReading(wire(WIRE, "assignments", "assignments", value=[G4, other]), monkeypatch, tmp_path)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        colab.bad = True
+        app.action_sample()
+        await settle(app, pilot)
+        await pilot.resize_terminal(120, 46)
+        await settle(app, pilot)
+        assert app.is_running
+        assert app.samples.latest(G4["endpoint"]) is not None and app.samples.latest(other["endpoint"]) is None
+
+
+async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_drawing(tmp_path):
+    (tmp_path / "cache").write_text("a file where cotop's cache directory should be")
+    colab = mixed()
+    app = Dashboard(colab, tmp_path / "cache")
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        colab._rate = 12.0  # a new rate: the usage log writes again
+        app.action_refresh()
+        await settle(app, pilot)
+        assert app.query_one(Runtimes).row_count == 3
+        assert "compute units left" in str(app.query_one("#usage-text").render())
+        assert [n.severity for n in app._notifications if "Can't save" in str(n.message)] == ["warning"]
+
+
+def test_a_large_balance_on_one_cpu_runtime_still_draws():
+    """The runway bound only keeps the end date inside a datetime; a real account never reaches it."""
+    a = Account.parse("me@example.com", {"currentBalance": 500_000, "consumptionRateHourly": 0.07, "assignmentsCount": 1})
+    assert "until" in account_text(a, NOW, None).plain
+
+
+# Fuzz: any value Colab could put at any place in a reply either fails its parse or draws.
+
+ODD = st.one_of(
+    st.sampled_from([0, 1, 0.5, 85, -1, True, False, None, "", "5227.43", [], {}, ["H100"], [{"name": "H100"}], 10**400, 2**63, 2**63 - 1]),
+    st.sampled_from([1e308, -1e308, 5e-324, float("inf"), float("nan"), "2026-11-17T20:59:46", "9999-12-31T23:59:59+00:00", "0001-01-01T00:00:00Z"]),
+    st.integers(),
+    st.floats(),
+    st.text(max_size=8),
+)
+GONE = object()  # the key is left out
+
+
+def places(node, at=()):
+    yield at
+    children = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+    for key, child in children:
+        yield from places(child, (*at, key))
+
+
+def mutated(data, body):
+    """body with up to three of its values, at any depth, replaced by odd ones or left out."""
+    body = copy.deepcopy(body)
+    for at in data.draw(st.lists(st.sampled_from(list(places(body))[1:]), max_size=3)):
+        value = data.draw(st.one_of(ODD, st.just(GONE)))
+        try:
+            parent = body
+            for key in at[:-1]:
+                parent = parent[key]
+            if value is GONE:
+                del parent[at[-1]]
+            else:
+                parent[at[-1]] = value
+        except (KeyError, IndexError, TypeError):  # an earlier change removed this place
+            pass
+    return body
+
+
+def parsed(parse):
+    try:
+        return parse()
+    except Exception:  # turned away: a gap, a row error or a toast, as the replay cases show
+        return None
+
+
+def is_whole(n) -> bool:
+    return type(n) is int and 0 <= n < 2**63
+
+
+def is_fraction(u) -> bool:
+    return type(u) in (int, float) and 0 <= u <= 1
+
+
+@settings(max_examples=400, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+@given(st.data())
+def test_every_value_that_parses_draws(data):
+    email = data.draw(st.one_of(st.just("me@example.com"), ODD))
+    account = parsed(lambda: Account.parse(email, mutated(data, WIRE["ccu"])))
+    reading = parsed(lambda: Resources.parse(NOW, mutated(data, parse_json(WIRE["/api/colab/resources"]))))
+    health = parsed(lambda: Status.parse(mutated(data, WIRE["/api/status"]), mutated(data, WIRE["/api/kernels"])))
+    runtimes = parsed(lambda: runtimes_from([mutated(data, G4)], LOCAL, {G4["endpoint"]: health or ValueError("bad status")}))
+
+    if account:
+        assert type(account.email) is str and all(type(n) is str for n in account.eligible_gpus + account.eligible_tpus)
+        assert all(type(n) in (int, float) and math.isfinite(n) for n in (account.balance, account.rate_hourly))
+        assert is_whole(account.assignments_count)
+        account_text(account, NOW, None)
+        list(HistoryScreen(Snapshot(NOW, account, runtimes or [], History({})), RateBook(Path("/nonexistent/rates.json"))).compose())
+    if reading:
+        assert all(is_whole(n) for n in (reading.memory_total, reading.memory_free, reading.disk_total, reading.disk_used))
+        assert all(type(g.name) is str and (g.utilization is None or is_fraction(g.utilization)) for g in reading.gpus)
+        assert all(is_whole(g.memory_used) and is_whole(g.memory_total) for g in reading.gpus)
+        meters(reading, 14)
+        sparkline([reading.gpu_utilization], 8)
+    if health:
+        assert health.started.tzinfo and all(k.last_activity.tzinfo for k in health.kernels)
+        assert all(type(k.state) is str and is_whole(k.connections) for k in health.kernels)
+    for r in runtimes or []:
+        assert all(type(v) is str for v in (r.endpoint, r.accelerator, r.shape, r.token)) and (r.url is None or type(r.url) is str)
+        r.concerns(NOW, reading)
+        state_text(r, NOW, reading)
