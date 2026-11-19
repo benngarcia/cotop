@@ -670,3 +670,88 @@ async def test_a_vanished_selection_stays_on_its_row_and_x_follows_it(isolated):
         await pilot.press("x")
         await settle(app, pilot)
         assert colab.calls == [("ssh", after[2])]
+
+
+def test_quitting_does_not_wait_for_a_read_in_flight(isolated):
+    """A read stalled on the network must not hold the terminal after q: Python joins pool threads on exit."""
+    import threading
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    released, finished = threading.Event(), threading.Event()
+    ccu_info = colab.ccu_info
+
+    def stalled():
+        app.call_from_thread(app.exit)  # q, pressed while this read waits
+        released.wait(5)
+        finished.set()
+        return ccu_info()
+
+    colab.ccu_info = stalled
+    app.run(headless=True)
+    assert not finished.is_set()  # run() returned with the read still in flight
+    released.set()
+
+
+async def test_a_stuck_refresh_is_reported_and_the_header_turns_stale(isolated, monkeypatch):
+    """A poll that never returns (the CLI's lock read waits for weeks) must not leave old figures looking current."""
+    import threading
+
+    import cotop.app
+
+    monkeypatch.setattr(cotop.app, "POLL_DEADLINE", 0.5)
+    monkeypatch.setattr(cotop.app, "STALE", timedelta(seconds=1))
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    stuck = threading.Event()
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        usage = app.query_one("Usage")
+        assert "updated 0s ago" in usage.border_title
+        colab.sessions = lambda: stuck.wait(10)
+        await pilot.press("r")
+        await pilot.pause(1.2)
+        assert any("still reading after 0.5 s" in str(n.message) for n in app._notifications)
+        usage.show_age()  # what its one-second timer does
+        assert "stale, updated 1s ago" in usage.border_title
+        stuck.set()
+
+
+async def test_keys_typed_while_x_checks_the_name_answer_nothing(isolated):
+    """The check blocks the loop; `s y` typed then would stop the runtime before its prompt was drawn."""
+    from textual import events
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+
+    def ssh_command(runtime):
+        for key in "sy":  # what the driver's input thread does with keys read meanwhile
+            app._driver.send_message(events.Key(key, key))
+        raise RuntimeError("train is no longer this runtime; refresh and retry")
+
+    colab.ssh_command = ssh_command
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert colab.calls == [] and app.screen is app.screen_stack[0]
+        await pilot.press("s")  # typed after: works
+        assert "Stop train" in str(app.screen.query_one("Label").render())
+
+
+async def test_a_read_that_returns_while_cotop_quits_touches_no_widgets(isolated):
+    """Textual takes the screens down before it cancels workers; a read landing in between must not show anything."""
+    import time
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+
+        def returns_as_cotop_quits():
+            while app.is_running:
+                time.sleep(0.001)
+            return ccu(10.05, 1)
+
+        colab.ccu_info = returns_as_cotop_quits
+        app.action_refresh()
