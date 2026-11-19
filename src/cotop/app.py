@@ -7,6 +7,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from functools import partial
 from pathlib import Path
 
 from rich.text import Text
@@ -120,29 +121,24 @@ class RuntimePanel(Vertical):
     def __init__(self, samples: Samples, **kwargs):
         super().__init__(**kwargs)
         self.samples = samples
-        self.runtime: Runtime | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal():
             with Vertical(classes="plot"):
                 yield Static(classes="plot-label")
                 yield Graph(WORK)
-                yield TimeAxis(self.reading_time)
+                yield TimeAxis()
             with Vertical(classes="side"):
                 yield Static(classes="meters")
                 yield Static(classes="facts")
                 yield Static(classes="activity")
 
-    def reading_time(self, n: int) -> datetime | None:
-        return self.samples.time_of(self.runtime.endpoint, n) if self.runtime else None
-
     def show(self, r: Runtime, s: Snapshot, rates: RateBook) -> None:
-        self.runtime = r
         now = s.taken_at
         latest = self.samples.latest(r.endpoint)
         self.border_title = f"{r.label}  {r.hardware}{' high-RAM' if r.shape == 'HIGH_RAM' else ''}"
         self.border_subtitle = state_text(r, now, latest).plain + (f"  {r.running}" if r.running else "")
-        self.show_readings()
+        self.show_readings(r)
 
         rate = rates.rate(r, s.runtimes, s.account)
         billed = r.billed_for(now)
@@ -166,16 +162,14 @@ class RuntimePanel(Vertical):
         activity = Text("\n").join(Text.assemble((clock(e.at) + "  ", DIM), e.summary) for e in events)
         self.query_one(".activity", Static).update(activity or Text("no CLI activity", style=DIM))
 
-    def show_readings(self) -> None:
-        if self.runtime is None:
-            return
-        latest = self.samples.latest(self.runtime.endpoint)
+    def show_readings(self, r: Runtime) -> None:
+        latest = self.samples.latest(r.endpoint)
         graph = self.query_one(Graph)
         has_gpu = bool(latest and latest.gpus)
         metric = (lambda x: x.gpu_utilization) if has_gpu or latest is None else (lambda x: fraction(*x.ram))
         graph.gradient = WORK if has_gpu or latest is None else PRESSURE
-        graph.values = self.samples.series(self.runtime.endpoint, metric)
-        self.query_one(TimeAxis).refresh()
+        graph.values = self.samples.series(r.endpoint, metric)
+        self.query_one(TimeAxis).time_of = partial(self.samples.time_of, r.endpoint)
         now_value = metric(latest) if latest else None
         name = latest.gpus[0].name if has_gpu else ("RAM" if latest else "GPU")
         label = Text.assemble((f"{now_value:.0%}" if now_value is not None else "–", "bold"), ("  " + name, DIM))
@@ -484,7 +478,8 @@ class Dashboard(App):
         for endpoint, reading in readings.items():
             self.samples.add(endpoint, at, reading)
         if self.snapshot:
-            self.query_one(RuntimePanel).show_readings()
+            if r := self.selected_runtime():
+                self.query_one(RuntimePanel).show_readings(r)
             self.query_one(Runtimes).show_readings(self.snapshot, self.samples)
 
     # Showing.

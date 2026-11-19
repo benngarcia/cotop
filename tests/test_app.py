@@ -378,6 +378,8 @@ async def test_the_demo_runs_and_sorts_the_most_expensive_first(tmp_path):
         assert table.row_count == 12 and table.border_title == "Runtimes (12)"
         rates = [float(str(table.get_row_at(i)[3]).lstrip("≈")) for i in range(table.row_count)]
         assert rates == sorted(rates, reverse=True)
+        axis = str(app.query_one(RuntimePanel).query_one("TimeAxis").render())
+        assert "m ago" in axis and axis.endswith("now")  # the selected runtime's oldest visible reading
         assert "Up" in table.columns
         await pilot.resize_terminal(80, 24)
         await settle(app, pilot)
