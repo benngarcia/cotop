@@ -561,7 +561,10 @@ class Dashboard(App):
         except Exception as e:
             self.notify(f"{r.name}: {e}", severity="error", timeout=10)
         else:
-            self.run_in_terminal(argv)
+            with self.suspend():  # blocks the event loop: no timer redraws behind the shell, no key acts until it closes
+                code = subprocess.run(argv).returncode
+                if code != 0:  # keep colab's error on screen; resuming would paint over it
+                    input(f"\ncolab ssh exited {code}. Press Enter to return to cotop.")
         self.action_refresh()
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
@@ -598,13 +601,6 @@ class Dashboard(App):
         finally:
             self.call_from_thread(self.acting.discard, runtime.endpoint)
             self.call_from_thread(self.action_refresh)
-
-    def run_in_terminal(self, argv: list[str]) -> None:
-        # suspend() blocks the event loop, so no timer redraws behind the shell and no key acts until it closes
-        with self.suspend():
-            code = subprocess.run(argv).returncode
-            if code != 0:  # keep colab's error on screen; resuming would paint over it
-                input(f"\ncolab ssh exited {code}. Press Enter to return to cotop.")
 
 
 def main() -> None:
