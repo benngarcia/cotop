@@ -1,0 +1,28 @@
+# Runs the test suite on every pull request and push to main, and before each
+# release: publish.yml calls this workflow and publishes only if it passes.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The oldest Python pyproject.toml allows, and one on the other side of uv.lock's 3.14 split.
+        python: ["3.12", "3.14"]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+        with:
+          python-version: ${{ matrix.python }}
+      - run: uv run --frozen pytest

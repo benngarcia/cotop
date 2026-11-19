@@ -1,6 +1,7 @@
 # Publishes to PyPI when a version tag is pushed, with PyPI trusted publishing:
 # PyPI trusts this workflow's GitHub identity, so no token is stored anywhere.
-# To release, run `uv version X.Y.Z`, merge, and push an annotated `vX.Y.Z` tag.
+# To release, run `uv version X.Y.Z`, merge, and push an annotated `vX.Y.Z` tag
+# on a commit on main. It publishes only if the tests pass on that commit.
 name: Publish
 
 on:
@@ -8,14 +9,25 @@ on:
     tags: ["v*"]
 
 jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   pypi:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       id-token: write  # the OIDC token PyPI checks
       contents: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4
+        with:
+          fetch-depth: 0  # main's history, for the check below
+          persist-credentials: false
       - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e  # v6
+      - name: Tag is on main
+        run: git merge-base --is-ancestor HEAD origin/main || { echo "::error::${GITHUB_REF_NAME} is not on main"; exit 1; }
       - name: Tag matches the package version
         run: test "v$(uv version --short)" = "${GITHUB_REF_NAME}"
       - run: uv build
