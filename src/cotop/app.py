@@ -22,11 +22,10 @@ from textual.worker import Worker, WorkerState
 from cotop.colab import Colab
 from cotop.model import (
     Account,
-    History,
+    Rate,
     RateBook,
     Resources,
     Runtime,
-    Rate,
     Samples,
     Snapshot,
     UsageLog,

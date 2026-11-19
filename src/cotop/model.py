@@ -348,7 +348,7 @@ class Basis(Enum):
 
     REPORTED = "reported"  # the account's total, and this runtime is the only one
     SPLIT = "split"  # the total over runtimes all of one kind
-    LEARNED = "learned"  # what this kind cost when it last ran alone
+    LEARNED = "learned"  # what this kind cost when it last ran alone, scaled to the total when it can be
     UNKNOWN = "unknown"
 
 
@@ -408,8 +408,9 @@ class RateBook:
     def rate(self, runtime: Runtime, s: Snapshot) -> Rate:
         """The account's total, split if it can be; a read that straddled a start or stop never splits.
 
-        Mixed kinds split in proportion to their learned rates, so the rows add up to the
-        total Colab charges now; with a kind not yet learned, each row shows its rate as learned.
+        When every kind running has been learned, mixed kinds split the total in proportion
+        to their learned rates, so the rows add up to what Colab charges now. Otherwise each
+        row shows its kind's learned rate, or none.
         """
         total, kinds = s.account.rate_hourly, [r.kind for r in s.runtimes]
         if s.consistent and len(kinds) == 1:
