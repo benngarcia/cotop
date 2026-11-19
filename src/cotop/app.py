@@ -171,7 +171,7 @@ class RuntimePanel(Vertical):
 
     def show(self, r: Runtime, s: Snapshot, rates: RateBook) -> None:
         now = s.taken_at
-        latest = self.samples.latest(r.endpoint)
+        latest = self.samples.latest(r.endpoint, utc_now())
         self.border_title = f"{r.label}  {r.hardware}{' high-RAM' if r.shape == 'HIGH_RAM' else ''}"
         self.border_subtitle = state_text(r, now, latest).plain + (f"  {r.running}" if r.running else "")
         self.show_readings(r)
@@ -197,18 +197,20 @@ class RuntimePanel(Vertical):
         self.query_one(".activity", Static).update(activity or Text("no CLI activity", style=DIM))
 
     def show_readings(self, r: Runtime) -> None:
-        latest = self.samples.latest(r.endpoint)
+        now = utc_now()
+        latest = self.samples.latest(r.endpoint, now)
         graph = self.query_one(Graph)
-        has_gpu = bool(latest and latest.gpus)
-        metric = (lambda x: x.gpu_utilization) if has_gpu or latest is None else (lambda x: fraction(*x.ram))
-        graph.gradient = WORK if has_gpu or latest is None else PRESSURE
+        hardware = self.samples.newest(r.endpoint)  # a stale reading still says which graph this runtime has
+        has_gpu = hardware is None or bool(hardware.gpus)
+        metric = (lambda x: x.gpu_utilization) if has_gpu else (lambda x: fraction(*x.ram))
+        graph.gradient = WORK if has_gpu else PRESSURE
         graph.values = self.samples.series(r.endpoint, metric)
         self.query_one(TimeAxis).time_of = partial(self.samples.time_of, r.endpoint)
         now_value = metric(latest) if latest else None
-        name = latest.gpus[0].name if has_gpu else ("RAM" if latest else "GPU")
+        name = "RAM" if not has_gpu else hardware.gpus[0].name if hardware else "GPU"
         label = Text.assemble((f"{now_value:.0%}" if now_value is not None else "–", "bold"), ("  " + name, DIM))
         self.query_one(".plot-label", Static).update(label)
-        self.query_one(".meters", Static).update(meters(latest, width=14))
+        self.query_one(".meters", Static).update(meters(latest, self.samples.failure(r.endpoint, now), width=14))
 
 
 def fraction(used: int, total: int) -> float | None:
@@ -216,7 +218,9 @@ def fraction(used: int, total: int) -> float | None:
     return used / total if total else None
 
 
-def meters(res: Resources | None, width: int) -> Text:
+def meters(res: Resources | None, failure: Exception | None, width: int) -> Text:
+    if failure:
+        return Text(f"no readings\n{type(failure).__name__}: {failure}", style=ORANGE)
     if res is None:
         return Text("waiting for readings", style=DIM)
     rows = []
@@ -313,7 +317,7 @@ class Runtimes(DataTable):
                 "CU/hr": rate_text(rate),
                 "Spent": spend_text(rate, billed) if billed else "?",
                 "Up": time_text(billed) if billed else "?",
-                "State": state_text(r, now, samples.latest(r.endpoint)),
+                "State": state_text(r, now, samples.latest(r.endpoint, utc_now())),
             }
             for column, value in cells.items():
                 if column in self.columns:
@@ -321,8 +325,9 @@ class Runtimes(DataTable):
         self.show_readings(s, samples)
 
     def show_readings(self, s: Snapshot, samples: Samples) -> None:
+        now = utc_now()
         for r in s.runtimes:
-            latest = samples.latest(r.endpoint)
+            latest = samples.latest(r.endpoint, now)
             util = latest.gpu_utilization if latest else None
             cell = sparkline(samples.series(r.endpoint, lambda x: x.gpu_utilization), 8)
             cell.append(f" {util:4.0%}" if util is not None else "    –")
@@ -411,6 +416,7 @@ class HistoryScreen(Screen):
 
 class Dashboard(App):
     TITLE = "cotop"
+
     CSS = """
     Screen { layout: vertical; }
     .panel, Usage, RuntimePanel, Runtimes {
@@ -457,7 +463,7 @@ class Dashboard(App):
         self.snapshot: Snapshot | None = None
         self.polling: Worker | None = None
         self.refresh_pending = False  # asked for while a poll ran, which may predate the change
-        self.sampling: Worker | None = None
+        self.reads_out: set[str] = set()  # endpoints with a resources read out
         self.unsaved_reported = False
         self.acting: set[str] = set()  # endpoints with a stop or kernel restart not yet returned
         self.input_from = 0.0  # Textual's clock (monotonic): input made before this is dropped unread
@@ -490,8 +496,21 @@ class Dashboard(App):
             self.action_refresh()
 
     def action_sample(self) -> None:
-        if self.snapshot and not (self.sampling and self.sampling.is_running):
-            self.sampling = self.sample(self.snapshot.runtimes)
+        """Read each runtime on its own, so a slow one holds back only itself.
+
+        A runtime whose last read is still out gets a gap for this tick, so
+        every tick leaves one entry per runtime and the graph keeps time.
+        """
+        if not self.snapshot or not self.is_running:  # quitting takes the widgets down before it stops timers
+            return
+        now = utc_now()
+        for r in self.snapshot.runtimes:
+            if r.endpoint in self.reads_out:
+                self.samples.add(r.endpoint, now, TimeoutError("the last read has not returned"))
+            else:
+                self.reads_out.add(r.endpoint)
+                self.sample(r)
+        self.show_readings()
 
     @work
     async def poll(self) -> None:
@@ -515,15 +534,21 @@ class Dashboard(App):
         runtimes = runtimes_from(assignments, await detached(colab.sessions), status, history.assigned_at())
         return Snapshot(utc_now(), account, runtimes, history)
 
-    @work(thread=True)
-    def sample(self, runtimes: list[Runtime]) -> None:
-        at = utc_now()
-        readings = self.colab.resources(runtimes)
-        self.call_from_thread(self.add_readings, at, readings)
+    @work
+    async def sample(self, runtime: Runtime) -> None:
+        reading = await detached(partial(self.colab.resources, runtime))
+        self.reads_out.discard(runtime.endpoint)
+        self.add_readings(utc_now(), {runtime.endpoint: reading})
 
-    def add_readings(self, at: datetime, readings: dict[str, Resources | None]) -> None:
+    def add_readings(self, at: datetime, readings: dict[str, Resources | Exception]) -> None:
+        """Only for runtimes still listed: a read that started before a poll removed its runtime lands nowhere."""
+        live = {r.endpoint for r in self.snapshot.runtimes} if self.snapshot else set()
         for endpoint, reading in readings.items():
-            self.samples.add(endpoint, at, reading)
+            if endpoint in live:
+                self.samples.add(endpoint, at, reading)
+        self.show_readings()
+
+    def show_readings(self) -> None:
         if self.snapshot:
             if r := self.selected_runtime():
                 self.query_one(RuntimePanel).show_readings(r)

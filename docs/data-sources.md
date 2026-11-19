@@ -33,8 +33,32 @@ requests at all.
 | Runtimes | `/tun/m/assignments` | Every VM the account holds, including ones opened in a browser. These show as *untracked* |
 | Runtime names, running command | `~/.config/colab-cli/sessions.json` | Read under the CLI's file lock and joined on `endpoint`. `colab sessions` and `colab status` prune and rewrite this file, and `colab stop`, which cotop runs on `s`, updates it |
 | Kernel state, idle time, clients | Runtime proxy `/api/kernels`, `/api/status` | Requests carry `?no_track_activity=1` |
-| GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. A read that fails, takes over 3 s, or has a value of the wrong type is a gap in the graph, never a zero. Utilization is a fraction from 0 to 1 |
+| GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. A value of the wrong type fails the read. Utilization is a fraction from 0 to 1. See [Readings](#readings) |
 | Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Code, outputs and prompt replies are dropped as each line is read; see [SECURITY.md](../SECURITY.md#guarantees) |
+
+## Readings
+
+Each runtime's resources are read on their own, so a slow runtime holds back
+only its own graph. Every 2-second tick adds one entry per runtime to its
+graph:
+
+- a reading, once the read returns;
+- a gap, never a zero, when the read fails or the whole reply takes over
+  3 s. A proxy that sends the body a few bytes at a time is cut off at 3 s.
+  One that trickles its headers can hold the read longer, and the reply is
+  still a gap;
+- a gap when the runtime's last read is still out at the next tick, so the
+  graph keeps time while one read is slow.
+
+The meters, the `GPU` column and the idle warning use a reading only while
+it is under 10 s old. After that the runtime shows `–`, and its idle time
+alone decides whether it warns that it is idle and still billing. Once reads
+have failed for 10 s, the panel shows the last error in place of the meters.
+
+The `rate over 24h` graph draws only the hours cotop was running. cotop
+writes the balance and rate to `~/.cache/cotop/usage.jsonl` when either
+changes, and again every 5 minutes when neither does. A stretch with no entry
+for over 10 minutes is a gap in the graph.
 
 ## Estimates
 

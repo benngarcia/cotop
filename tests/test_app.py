@@ -1,8 +1,13 @@
 """The dashboard rendered from fixture payloads, with no network and temp state dirs."""
 
+import contextlib
 import copy
+import dataclasses
+import io
 import json
 import math
+import threading
+import time
 from datetime import timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +22,7 @@ from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
 
-from cotop.widgets import RED, sparkline
+from cotop.widgets import ORANGE, RED, sparkline
 from cotop.model import Account, History, KernelState, PastSession, RateBook, Resources, Snapshot, Status, Unreachable, parse_json, runtimes_from, utc_now
 from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
@@ -49,8 +54,8 @@ class StubColab:
     def status(self, assignments):
         return self._status
 
-    def resources(self, runtimes):
-        return {r.endpoint: self._readings.get(r.endpoint) for r in runtimes}
+    def resources(self, runtime):
+        return self._readings.get(runtime.endpoint, ConnectionError("proxy said 502"))
 
     def stop(self, runtime):
         self.calls.append(("stop", runtime.endpoint))
@@ -347,8 +352,95 @@ async def test_a_failed_reading_is_kept_as_a_gap(isolated):
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         app.add_readings(utc_now(), {G4["endpoint"]: resources(0.5)})
-        app.add_readings(utc_now(), {G4["endpoint"]: None})
+        app.add_readings(utc_now(), {G4["endpoint"]: ConnectionError("proxy said 502")})
         assert app.samples.series(G4["endpoint"], lambda r: r.gpu_utilization)[-2:] == [0.5, None]
+
+
+async def test_an_old_reading_is_not_shown_as_now_and_idle_billing_still_warns(isolated):
+    """Reads that keep failing leave no GPU % on screen, and say why, so an idle VM still warns it is billing."""
+    colab = StubColab([G4], {G4["endpoint"]: status("idle", "2026-11-17T21:00:00Z")}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        start = utc_now() - timedelta(minutes=29)
+        app.add_readings(start, {G4["endpoint"]: resources(0.97)})  # the last read that worked
+        for i in range(1, 870):
+            app.add_readings(start + timedelta(seconds=2 * i), {G4["endpoint"]: ConnectionError("proxy said 502")})
+        await pilot.press("r")
+        await settle(app, pilot)
+        row = cells(app.query_one(Runtimes), 0)
+        assert row["GPU"].endswith("–") and row["State"].startswith("idle")
+        assert app.query_one(Runtimes).get_cell(G4["endpoint"], "State").style == ORANGE  # the warning, not plain idle
+        panel = app.query_one(RuntimePanel)
+        assert str(panel.query_one(".plot-label").render()).startswith("–")
+        assert "still billing" in str(panel.query_one(".facts").render())
+        assert "ConnectionError: proxy said 502" in str(panel.query_one(".meters").render())
+
+
+async def test_a_cpu_runtime_keeps_its_ram_graph_when_its_reading_goes_stale(isolated):
+    colab = StubColab([CPU], {CPU["endpoint"]: status()}, {}, rate=0.07)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        cpu_reading = dataclasses.replace(resources(), gpus=())
+        app.add_readings(utc_now() - timedelta(minutes=1), {CPU["endpoint"]: cpu_reading})
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert str(app.query_one(RuntimePanel).query_one(".plot-label").render()) == "–  RAM"
+
+
+async def test_one_slow_runtime_holds_back_only_its_own_readings(isolated, monkeypatch):
+    """Each tick leaves one entry per runtime: a reading, or a gap while the last read is still out."""
+    monkeypatch.setattr("cotop.app.SAMPLE_SECONDS", 0.1)
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    colab.resources = lambda r: time.sleep(0.35) or resources(0.5) if r.endpoint == T4["endpoint"] else resources(1.0)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.pause(1.5)
+        fast, slow = (list(app.samples.readings[a["endpoint"]]) for a in (G4, T4))
+    assert len(fast) >= 8 and all(r.gpu_utilization == 1.0 for _, r in fast)
+    assert abs(len(fast) - len(slow)) <= 1
+    assert {type(r).__name__ for _, r in slow} == {"Resources", "TimeoutError"}
+    times = [at for at, _ in slow]
+    assert times == sorted(times)
+
+
+async def test_a_read_that_lands_after_its_runtime_is_gone_is_dropped(isolated):
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    gate, started = threading.Event(), threading.Event()
+    colab.resources = lambda r: (r.endpoint == T4["endpoint"] and (started.set(), gate.wait(5)), resources(0.5))[-1]
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.action_sample()
+        started.wait(5)
+        colab._assignments, colab._status = [G4], {G4["endpoint"]: status()}  # T4 stopped elsewhere
+        await pilot.press("r")
+        while app.polling.is_running:
+            await pilot.pause(0.05)
+        assert T4["endpoint"] in app.reads_out
+        gate.set()
+        while T4["endpoint"] in app.reads_out:
+            await pilot.pause(0.05)
+        assert T4["endpoint"] not in app.samples.readings and G4["endpoint"] in app.samples.readings
+
+
+async def test_a_read_that_lands_while_cotop_quits_is_dropped(isolated):
+    """Quitting takes the widgets down before it cancels workers; a reading landing in between must not crash."""
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+
+    def read_until_quit(runtime):
+        while app.is_running:
+            time.sleep(0.001)
+        return resources(0.5)
+
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        colab.resources = read_until_quit
+        app.action_sample()
+    # leaving run_test quits, and re-raises a worker's crash
 
 
 async def test_selection_survives_the_runtime_list_changing(isolated):
@@ -378,7 +470,7 @@ async def test_readings_arriving_while_the_selection_moves(isolated):
         await settle(app, pilot)
         for step in range(6):
             await pilot.press("down" if step % 2 == 0 else "up")
-            app.add_readings(utc_now(), {G4["endpoint"]: resources(0.3), T4["endpoint"]: None})
+            app.add_readings(utc_now(), {G4["endpoint"]: resources(0.3), T4["endpoint"]: ConnectionError("proxy said 502")})
             await pilot.pause()
         assert app.is_running
 
@@ -797,9 +889,13 @@ class WireColab(Colab):
         key = "ccu" if "ccu-info" in url else "assignments" if "assignments" in url else None
         return self.reply(self.body[key]) if key else self.reply({"email": "me@example.com"})
 
-    def proxy_get(self, url, headers, params, timeout, allow_redirects):
+    def proxy_get(self, url, headers, params, timeout, allow_redirects, stream):
+        body = io.BytesIO(self.proxy_reply(url).encode())
+        return contextlib.nullcontext(SimpleNamespace(is_redirect=False, raise_for_status=lambda: None, raw=SimpleNamespace(read1=lambda decode_content: body.read1())))
+
+    def proxy_reply(self, url) -> str:
         path = next(p for p in ("/api/status", "/api/kernels", "/api/colab/resources") if url.endswith(p))
-        return SimpleNamespace(is_redirect=False, raise_for_status=lambda: None, text=self.reply(self.body[path]))
+        return self.reply(self.body[path])
 
 
 NO_PROXY = {k: v for k, v in assignment("gpu-t4-provisioning", "T4").items() if k != "runtimeProxyInfo"}
@@ -868,11 +964,10 @@ class OneBadReading(WireColab):
 
     bad = False
 
-    def proxy_get(self, url, **kwargs):
-        reply = super().proxy_get(url, **kwargs)
+    def proxy_reply(self, url) -> str:
         if self.bad and "other" in url and url.endswith("/resources"):
-            reply.text = self.reply(wire(WIRE, "/api/colab/resources", "memory", "freeBytes", value=None)["/api/colab/resources"])
-        return reply
+            return self.reply(wire(WIRE, "/api/colab/resources", "memory", "freeBytes", value=None)["/api/colab/resources"])
+        return super().proxy_reply(url)
 
 
 async def test_a_bad_reading_on_another_runtime_survives_a_resize(isolated, monkeypatch, tmp_path):
@@ -888,7 +983,7 @@ async def test_a_bad_reading_on_another_runtime_survives_a_resize(isolated, monk
         await pilot.resize_terminal(120, 46)
         await settle(app, pilot)
         assert app.is_running
-        assert app.samples.latest(G4["endpoint"]) is not None and app.samples.latest(other["endpoint"]) is None
+        assert app.samples.latest(G4["endpoint"], utc_now()) is not None and app.samples.latest(other["endpoint"], utc_now()) is None
 
 
 async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_drawing(tmp_path):

@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from cotop.model import Created, Event, Gpu, History, Kernel, KernelState, Resources, Runtime, Status, Terminated, utc_now
+from cotop.model import Created, Event, Gpu, History, Kernel, KernelState, Resources, Runtime, Status, Terminated, UsageLog, utc_now
 
 GB = 1_000_000_000
 STEP = timedelta(seconds=2)  # one reading every two seconds, like the real sampler
@@ -73,7 +73,9 @@ def utilization(m: Machine, i: int, rng: random.Random) -> float:
             return 0.0
 
 
-def reading(m: Machine, i: int, at: datetime) -> Resources:
+def reading(m: Machine, i: int) -> Resources | Exception:
+    if m.unreachable:
+        return ConnectionError("runtime proxy returned 502")
     rng = random.Random(f"{m.endpoint}:{i}")
     u = utilization(m, i, rng)
     gpus = ()
@@ -81,7 +83,6 @@ def reading(m: Machine, i: int, at: datetime) -> Resources:
     if m.gpu:
         gpus = (Gpu(m.gpu, u, int(m.vram_total * (0.15 + 0.78 * (u > 0.05)) * GB), int(m.vram_total * GB)),)
     return Resources(
-        at=at,
         memory_total=int(m.ram_total * GB),
         memory_free=int((m.ram_total - ram_used) * GB),
         disk_total=235 * GB,
@@ -137,21 +138,14 @@ class DemoColab:
             out[m.endpoint] = Status(started=now - m.started_ago, kernels=(Kernel(state, last, 1),))
         return out
 
-    def resources(self, runtimes: list[Runtime]) -> dict[str, Resources | None]:
-        now = utc_now()
-        i = HISTORY + int((now - self.start) / STEP)
-        return {
-            r.endpoint: None if self.machines[r.endpoint].unreachable else reading(self.machines[r.endpoint], i, now)
-            for r in runtimes
-            if r.endpoint in self.machines
-        }
+    def resources(self, runtime: Runtime) -> Resources | Exception:
+        if runtime.endpoint not in self.machines:
+            return ConnectionError("runtime stopped")
+        return reading(self.machines[runtime.endpoint], HISTORY + int((utc_now() - self.start) / STEP))
 
-    def backfill(self) -> dict[str, list[Resources | None]]:
+    def backfill(self) -> dict[str, list[Resources | Exception]]:
         """Readings for the last HISTORY steps, so graphs open full instead of empty."""
-        return {
-            m.endpoint: [None if m.unreachable else reading(m, i, self.start - STEP * (HISTORY - i)) for i in range(HISTORY)]
-            for m in self.machines.values()
-        }
+        return {m.endpoint: [reading(m, i) for i in range(HISTORY)] for m in self.machines.values()}
 
     def sessions(self) -> dict[str, dict]:
         return {m.name: {"name": m.name, "endpoint": m.endpoint, "running": m.running} for m in self.machines.values() if m.name}
@@ -212,6 +206,9 @@ def seed_cache(cache: Path, now: datetime) -> None:
     steps = [(24, 0.0), (21, 4.82), (17, 16.59), (12, 31.0), (8, 45.6), (4, 62.3), (1.5, 74.1), (0.3, round(sum(m.rate for m in MACHINES), 2))]
     balance, lines = BALANCE + 520.0, []
     for (hours_ago, rate), (next_ago, _) in zip(steps, steps[1:] + [(0, 0)]):
-        lines.append(json.dumps([(now - timedelta(hours=hours_ago)).isoformat(), round(balance, 2), rate]))
+        at = now - timedelta(hours=hours_ago)
+        while at < now - timedelta(hours=next_ago):  # repeated as a watching cotop repeats them
+            lines.append(json.dumps([at.isoformat(), round(balance, 2), rate]))
+            at += UsageLog.REPEAT
         balance -= rate * (hours_ago - next_ago)
     (cache / "usage.jsonl").write_text("\n".join(lines) + "\n")

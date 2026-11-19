@@ -1,7 +1,13 @@
+import gzip
 import json
 import threading
+import time
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+
+import pytest
+import requests
+import urllib3
 
 from cotop import colab
 from cotop.colab import still_assigned
@@ -61,7 +67,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
     with runtime_proxy() as (a, seen):
         assert colab.Colab(None).status([a])[a["endpoint"]].started is not None
         [r] = running([a], {})
-        assert colab.Colab(None).resources([r])[r.endpoint] is not None
+        assert colab.Colab(None).resources(r).gpus
     assert len(seen) == 3
     assert all(method == "GET" and path.endswith("?no_track_activity=1") for method, path in seen), seen
 
@@ -69,7 +75,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
 def test_a_failed_resources_read_is_a_gap_not_a_zero():
     with runtime_proxy(code=502) as (a, _):
         [r] = running([a], {})
-        assert colab.Colab(None).resources([r]) == {r.endpoint: None}
+        assert isinstance(colab.Colab(None).resources(r), requests.HTTPError)
 
 
 def test_an_untracked_stop_unassigns_that_runtimes_endpoint():
@@ -135,6 +141,132 @@ def test_the_cli_library_never_logs_below_warning_or_to_its_log_file(monkeypatch
         assert not [h for h in handlers if str(getattr(h, "baseFilename", "")).endswith("colab.log")]
 
 
+def dribble(handler):
+    """A reply that starts at once and trickles 4 bytes every 0.3 s: each socket wait is short, the whole is not."""
+    body = (FIXTURES / "resources_g4.txt").read_bytes()[:40]
+    handler.send_response(200)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    for i in range(0, len(body), 4):
+        handler.wfile.write(body[i : i + 4])
+        handler.wfile.flush()
+        time.sleep(0.3)
+
+
+def dribble_chunked(handler):
+    handler.protocol_version = "HTTP/1.1"
+    handler.send_response(200)
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.end_headers()
+    for _ in range(10):
+        handler.wfile.write(b"4\r\n    \r\n")
+        handler.wfile.flush()
+        time.sleep(0.3)
+    handler.wfile.write(b"0\r\n\r\n")
+
+
+def stall_after_headers(handler):
+    handler.send_response(200)
+    handler.send_header("Content-Length", "100")
+    handler.end_headers()
+    handler.wfile.flush()
+    time.sleep(3)
+
+
+def say_nothing(handler):
+    time.sleep(3)
+
+
+def trickle_headers(handler):
+    """Headers a few bytes at a time: requests waits for all of them before cotop sees the reply."""
+    body = (FIXTURES / "resources_g4.txt").read_bytes()
+    head = f"HTTP/1.0 200 OK\r\nContent-Length: {len(body)}\r\nX-Pad: {'x' * 24}\r\n\r\n".encode()
+    for i in range(0, len(head), 8):
+        handler.wfile.write(head[i : i + 8])
+        handler.wfile.flush()
+        time.sleep(0.2)
+    handler.wfile.write(body)
+
+
+@contextmanager
+def proxy_replying(reply):
+    class Proxy(BaseHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                reply(self)
+            except OSError:  # the client hung up at its deadline
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+
+
+TIMEOUTS = (TimeoutError, requests.Timeout, urllib3.exceptions.TimeoutError)
+
+
+@pytest.mark.parametrize("reply", [dribble, dribble_chunked, stall_after_headers, say_nothing])
+def test_a_proxy_read_ends_at_its_deadline_however_the_reply_stalls(reply):
+    """data-sources.md: a read that takes over 3 s is a gap. Here the deadline is 1 s."""
+    from cotop.colab import _proxy_get
+
+    with proxy_replying(reply) as url:
+        started = time.monotonic()
+        with pytest.raises(TIMEOUTS):
+            _proxy_get(url, "t", "/api/colab/resources", 1)
+        assert time.monotonic() - started < 2  # the deadline, plus at most one socket wait
+
+
+def test_a_reply_whose_headers_trickle_past_the_deadline_is_still_a_gap():
+    """requests can't be cut off inside the headers; the reply that follows them is late, so it is no reading."""
+    from cotop.colab import _proxy_get
+
+    with proxy_replying(trickle_headers) as url, pytest.raises(TimeoutError):
+        _proxy_get(url, "t", "/api/colab/resources", 1)
+
+
+def content_length(handler, body):
+    handler.send_response(200)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def gzipped(handler, body):
+    zipped = gzip.compress(body)
+    handler.send_response(200)
+    handler.send_header("Content-Encoding", "gzip")
+    handler.send_header("Content-Length", str(len(zipped)))
+    handler.end_headers()
+    handler.wfile.write(zipped)
+
+
+def chunked(handler, body):
+    handler.protocol_version = "HTTP/1.1"
+    handler.send_response(200)
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.end_headers()
+    for i in range(0, len(body), 100):
+        part = body[i : i + 100]
+        handler.wfile.write(f"{len(part):x}\r\n".encode() + part + b"\r\n")
+    handler.wfile.write(b"0\r\n\r\n")
+
+
+@pytest.mark.parametrize("framing", [content_length, gzipped, chunked])
+def test_a_prompt_reply_is_a_reading_however_it_is_framed(framing):
+    body = (FIXTURES / "resources_g4.txt").read_bytes()
+    with proxy_replying(lambda handler: framing(handler, body)) as url:
+        [r] = running([{**G4, "runtimeProxyInfo": {"url": url, "token": "t"}}], {})
+        reading = colab.Colab(None).resources(r)
+    assert reading.gpu_utilization == 1.0 and reading.vram == (90_000_000_000, 100_000_000_000)
+
+
 FAKE_COLAB = """
 import sys
 mode = sys.argv[1]
@@ -188,3 +320,8 @@ def test_the_demo_runs_without_the_cli_library(tmp_path):
     script = "import sys; sys.modules['colab_cli'] = None; from cotop.app import demo_dashboard; demo_dashboard(__import__('pathlib').Path(sys.argv[1]))"
     done = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def test_a_runtime_without_a_proxy_yet_reads_as_that_not_a_crash():
+    [r] = running([{k: v for k, v in G4.items() if k != "runtimeProxyInfo"}], {})
+    assert str(colab.Colab(None).resources(r)) == "Colab has not given it a runtime proxy yet"
