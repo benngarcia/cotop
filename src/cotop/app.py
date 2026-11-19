@@ -25,7 +25,7 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.theme import Theme
 from textual.widgets import Button, DataTable, Footer, Label, Static
-from textual.worker import Worker, WorkerState
+from textual.worker import Worker, WorkerState, get_current_worker
 
 from cotop.model import (
     Account,
@@ -522,9 +522,8 @@ class Dashboard(App):
     @work
     async def sample(self, runtime: Runtime) -> None:
         reading = await detached(partial(self.colab.resources, runtime))
-        if self.is_running:  # quitting takes the widgets down before it cancels workers
-            self.reads_out.discard(runtime.endpoint)
-            self.add_readings(utc_now(), {runtime.endpoint: reading})
+        self.reads_out.discard(runtime.endpoint)
+        self.add_readings(utc_now(), {runtime.endpoint: reading})
 
     def add_readings(self, at: datetime, readings: dict[str, Resources | Exception]) -> None:
         """Only for runtimes still listed: a read that started before a poll removed its runtime lands nowhere."""
@@ -570,8 +569,8 @@ class Dashboard(App):
             table.show(self.snapshot, self.rates, self.samples)
 
     def show_error(self, e: Exception) -> None:
-        age = f" Showing data from {fmt_duration(utc_now() - self.snapshot.taken_at)} ago." if self.snapshot else ""
-        self.notify(f"Refresh failed: {type(e).__name__}: {e}.{age}", severity="error", timeout=POLL_SECONDS, markup=False)
+        """The account header already says how old the data on screen is."""
+        self.notify(f"Refresh failed: {type(e).__name__}: {e}.", severity="error", timeout=POLL_SECONDS, markup=False)
 
     # Selection and actions.
 
@@ -675,7 +674,13 @@ class Dashboard(App):
 
 
 async def detached[T](read: Callable[[], T]) -> T:
-    """read() on a daemon thread. Nothing joins it: quitting, or a poll that gave up, never waits for a stuck read."""
+    """read() on a daemon thread, awaited in a worker. Nothing joins the thread: quitting, or a poll that gave up,
+    never waits for a stuck read.
+
+    A read that returns once the app has begun quitting raises CancelledError instead: Textual takes the screens
+    down before it cancels workers, so whatever the caller would show has no widget left to show it in.
+    """
+    app = get_current_worker().node.app
     loop = asyncio.get_running_loop()
     done = loop.create_future()
 
@@ -688,7 +693,11 @@ async def detached[T](read: Callable[[], T]) -> T:
             loop.call_soon_threadsafe(lambda: done.cancelled() or outcome())
 
     threading.Thread(target=run, daemon=True).start()
-    return await done
+    try:
+        return await done
+    finally:
+        if not app.is_running:
+            raise asyncio.CancelledError
 
 
 def main() -> None:
