@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from cotop.model import Gpu, History, Kernel, Resources, Runtime, Status, utc_now
+from cotop.model import Created, Event, Gpu, History, Kernel, Resources, Runtime, Status, Terminated, utc_now
 
 GB = 1_000_000_000
 STEP = timedelta(seconds=2)  # one reading every two seconds, like the real sampler
@@ -174,36 +174,29 @@ class DemoColab:
 HISTORY = 450  # fifteen minutes of readings
 
 
-def demo_history(now: datetime) -> dict[str, list[dict]]:
+def demo_history(now: datetime) -> dict[str, list[Event | Created | Terminated]]:
     """The colab CLI's event log for the demo: live sessions plus a week of finished ones."""
-
-    def event(at, kind, **fields):
-        return {"timestamp": at.isoformat(), "event_type": kind, **fields}
-
-    def created(at, m_endpoint, accelerator, shape="STANDARD"):
-        return event(at, "session_created", endpoint=m_endpoint, variant="GPU", accelerator=accelerator, machine_shape=shape)
-
-    events: dict[str, list[dict]] = {}
+    events: dict[str, list[Event | Created | Terminated]] = {}
     for m in MACHINES:
         if not m.name:
             continue
         start = now - m.started_ago
-        log = [created(start, m.endpoint, m.accelerator, "HIGH_RAM" if m.shape else "STANDARD")]
-        log.append(event(start + timedelta(minutes=2), "file_operation", op="upload", remote="/content/data.tar.zst", local="-"))
-        log.append(event(start + timedelta(minutes=3), "execution", cell_index=0, cell_id="-", code="-", outputs=[]))
+        log = [
+            Created(start, m.endpoint, f"{'CPU' if m.accelerator == 'NONE' else m.accelerator}/{'HIGH_RAM' if m.shape else 'STANDARD'}"),
+            Event(start + timedelta(minutes=2), "upload data.tar.zst"),
+            Event(start + timedelta(minutes=3), "exec cell 0"),
+        ]
         if m.idle_for is None:
-            log += [event(now - timedelta(minutes=k), "file_operation", op="download", remote="/content/runs/metrics.json", local="-") for k in range(40, 0, -5)]
+            log += [Event(now - timedelta(minutes=k), "download metrics.json") for k in range(40, 0, -5)]
         events[m.name] = log
     rng = random.Random(7)
-    kinds = [("A100", "HIGH_RAM", 11.77), ("H100", "STANDARD", 15.04), ("L4", "STANDARD", 4.82), ("T4", "STANDARD", 1.76), ("NONE", "STANDARD", 0.08)]
+    kinds = ["A100/HIGH_RAM", "H100/STANDARD", "L4/STANDARD", "T4/STANDARD", "CPU/STANDARD"]
     for k in range(18):
-        accelerator, shape, _ = kinds[k % len(kinds)]
         start = now - timedelta(hours=10 + 9 * k, minutes=rng.randrange(60))
         end = start + timedelta(minutes=rng.randrange(8, 400))
-        name = f"run-{k:02d}"
-        events[name] = [
-            created(start, f"demo-ended-{k:02d}", accelerator, shape),
-            event(end, "session_terminated", reason="pruned" if k % 7 == 3 else "user_requested"),
+        events[f"run-{k:02d}"] = [
+            Created(start, f"demo-ended-{k:02d}", kinds[k % len(kinds)]),
+            Terminated(end, "pruned" if k % 7 == 3 else "user_requested"),
         ]
     return events
 

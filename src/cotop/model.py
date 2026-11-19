@@ -383,30 +383,42 @@ class PastSession:
 
 @dataclass(frozen=True)
 class Event:
+    """One line of the CLI's history, as cotop shows it."""
+
     at: datetime
     summary: str
 
 
-def summarize_event(e: dict) -> str:
-    """One line per CLI history event; never code, outputs or stdin replies."""
-    match e["event_type"]:
-        case "file_operation":
-            return f"{e.get('op', 'file')} {Path(e.get('remote') or '').name}"
-        case "execution":
-            return f"exec cell {e['cell_index']}" if e.get("cell_index") is not None else "exec"
-        case "session_created":
-            return "created"
-        case "session_terminated":
-            return f"terminated ({e.get('reason', '?')})"
-        case other:
-            return other
+@dataclass(frozen=True)
+class Created:
+    at: datetime
+    endpoint: str
+    kind: str
+    summary = "created"
+
+    def session(self, name: str, ended: Terminated | None) -> PastSession:
+        return PastSession(name, self.endpoint, self.kind, self.at, ended.at if ended else None, ended.reason if ended else None)
+
+
+@dataclass(frozen=True)
+class Terminated:
+    at: datetime
+    reason: str | None
+
+    @property
+    def summary(self) -> str:
+        return f"terminated ({self.reason or '?'})"
 
 
 @dataclass
 class History:
-    """The colab CLI's per-session event logs (~/.config/colab-cli/history)."""
+    """The colab CLI's per-session event logs (~/.config/colab-cli/history).
 
-    events: dict[str, list[dict]] = field(default_factory=dict)
+    Each line is cut down to what cotop shows when it is read, so code, outputs
+    and stdin replies never reach memory, the screen or a crash report.
+    """
+
+    events: dict[str, list[Event | Created | Terminated]] = field(default_factory=dict)
 
     @classmethod
     def load(cls, directory: Path) -> History:
@@ -415,24 +427,18 @@ class History:
 
     def assigned_at(self) -> dict[str, datetime]:
         """When the CLI was handed each endpoint."""
-        return {
-            e["endpoint"]: parse_time(e["timestamp"])
-            for events in self.events.values()
-            for e in events
-            if e["event_type"] == "session_created"
-        }
+        return {e.endpoint: e.at for events in self.events.values() for e in events if isinstance(e, Created)}
 
     def recent(self, name: str, limit: int = 8) -> list[Event]:
         """Newest first, with runs of the same event folded into one line."""
         runs: list[tuple[str, datetime, int]] = []
         for e in reversed(self.events.get(name, [])):
-            summary, at = summarize_event(e), parse_time(e["timestamp"])
-            if runs and runs[-1][0] == summary:
-                runs[-1] = (summary, runs[-1][1], runs[-1][2] + 1)
+            if runs and runs[-1][0] == e.summary:
+                runs[-1] = (e.summary, runs[-1][1], runs[-1][2] + 1)
             elif len(runs) == limit:
                 break
             else:
-                runs.append((summary, at, 1))
+                runs.append((e.summary, e.at, 1))
         return [Event(at, summary if n == 1 else f"{summary} ×{n}") for summary, at, n in runs]
 
     def past_sessions(self) -> list[PastSession]:
@@ -440,41 +446,46 @@ class History:
         sessions = []
         for name, events in self.events.items():
             created = None
-            for e in events + [{"event_type": "session_created"}]:  # sentinel flushes the last
-                if e["event_type"] == "session_created":
-                    if created:
-                        sessions.append(_past(name, created, None))
-                    created = e if "timestamp" in e else None
-                elif e["event_type"] == "session_terminated" and created:
-                    sessions.append(_past(name, created, e))
+            for e in [*events, None]:  # None flushes the last
+                if isinstance(e, Terminated) and created:
+                    sessions.append(created.session(name, e))
                     created = None
+                elif e is None or isinstance(e, Created):
+                    if created:
+                        sessions.append(created.session(name, None))
+                    created = e
         return sorted(sessions, key=lambda s: s.created, reverse=True)
 
 
-EVENT_FIELDS = {"session_created": {"endpoint", "accelerator", "machine_shape"}}  # what History reads beyond the type and time
-
-
-def _event(line: str) -> dict | None:
-    """One history line, if it is an event with the fields History reads."""
+def _event(line: str) -> Event | Created | Terminated | None:
+    """One history line, if it is an event cotop can read, keeping only what History shows."""
     try:
         e = json.loads(line)
-        if isinstance(e["event_type"], str) and parse_time(e["timestamp"]).tzinfo and EVENT_FIELDS.get(e["event_type"], set()) <= e.keys():
-            return e
+        at = parse_time(e["timestamp"])
     except (ValueError, TypeError, KeyError, AttributeError):
-        pass
+        return None
+    if not at.tzinfo:
+        return None
+    match e:
+        case {"event_type": "session_created", "endpoint": str(endpoint), "accelerator": str(accelerator), "machine_shape": str(shape)}:
+            return Created(at, endpoint, f"{'CPU' if accelerator == 'NONE' else accelerator}/{shape}")
+        case {"event_type": "session_created"}:  # without the fields History reads
+            return None
+        case {"event_type": "session_terminated"}:
+            return Terminated(at, _text(e.get("reason")))
+        case {"event_type": "file_operation"}:
+            return Event(at, f"{_text(e.get('op')) or 'file'} {Path(_text(e.get('remote')) or '').name}")
+        case {"event_type": "execution", "cell_index": int(cell)}:
+            return Event(at, f"exec cell {cell}")
+        case {"event_type": "execution"}:
+            return Event(at, "exec")
+        case {"event_type": str(other)}:
+            return Event(at, other)
     return None
 
 
-def _past(name: str, created: dict, ended: dict | None) -> PastSession:
-    hardware = "CPU" if created["accelerator"] == "NONE" else created["accelerator"]
-    return PastSession(
-        name=name,
-        endpoint=created["endpoint"],
-        kind=f"{hardware}/{created['machine_shape']}",
-        created=parse_time(created["timestamp"]),
-        ended=parse_time(ended["timestamp"]) if ended else None,
-        reason=ended.get("reason") if ended else None,
-    )
+def _text(value) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def runtimes_from(

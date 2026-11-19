@@ -191,17 +191,21 @@ def test_rate_series_steps_through_the_day(tmp_path):
     assert log.rate_series(NOW, 4) == [None, 1.76, 1.76, 11.77]
 
 
+SECRET_HISTORY = (  # a session's CLI history whose code, outputs and stdin reply are canaries
+    '{"timestamp": "2026-11-17T20:59:00+00:00", "event_type": "session_created", "endpoint": "%s", "variant": "GPU", "accelerator": "G4", "machine_shape": "STANDARD"}\n'
+    % G4["endpoint"]
+    + '{"timestamp": "2026-11-17T21:00:00+00:00", "event_type": "execution", "cell_index": 3, "cell_id": "c", "code": "HF_TOKEN = \'SECRET_CODE\'", "outputs": ["SECRET_OUT"]}\n'
+    '{"timestamp": "2026-11-17T21:01:00+00:00", "event_type": "input_reply", "value": "SECRET_PASSWORD"}\n'
+    '{"timestamp": "2026-11-17T21:02:00+00:00", "event_type": "file_operation", "op": "download", "remote": "/content/out/model.pt", "local": "/Users/x/model.pt"}\n'
+    '{"timestamp": "2026-11-17T21:30:00+00:00", "event_type": "session_terminated", "reason": "user_requested"}\n'
+)
+
+
 def test_history_never_surfaces_code_outputs_or_stdin(tmp_path):
-    (tmp_path / "train.jsonl").write_text(
-        '{"timestamp": "2026-11-17T20:59:00+00:00", "event_type": "session_created", "endpoint": "e", "variant": "GPU", "accelerator": "G4", "machine_shape": "STANDARD"}\n'
-        '{"timestamp": "2026-11-17T21:00:00+00:00", "event_type": "execution", "cell_index": 3, "cell_id": "c", "code": "SECRET_CODE", "outputs": ["SECRET_OUT"]}\n'
-        '{"timestamp": "2026-11-17T21:01:00+00:00", "event_type": "input_reply", "value": "SECRET_PASSWORD"}\n'
-        '{"timestamp": "2026-11-17T21:02:00+00:00", "event_type": "file_operation", "op": "download", "remote": "/content/out/model.pt", "local": "/Users/x/model.pt"}\n'
-        '{"timestamp": "2026-11-17T21:30:00+00:00", "event_type": "session_terminated", "reason": "user_requested"}\n'
-    )
+    (tmp_path / "train.jsonl").write_text(SECRET_HISTORY)
     h = History.load(tmp_path)
+    assert "SECRET" not in repr(h)  # not held at all, so no crash report can print it
     text = " ".join(e.summary for e in h.recent("train"))
-    assert "SECRET" not in text
     assert text == "terminated (user_requested) download model.pt input_reply exec cell 3 created"
     [p] = h.past_sessions()
     assert (p.kind, p.ended - p.created, p.reason) == ("G4/STANDARD", timedelta(minutes=31), "user_requested")
