@@ -22,7 +22,7 @@ from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
 
-from cotop.widgets import RED, sparkline
+from cotop.widgets import ORANGE, RED, sparkline
 from cotop.model import Account, History, PastSession, RateBook, Resources, Snapshot, Status, parse_json, runtimes_from, utc_now
 from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
@@ -365,6 +365,7 @@ async def test_an_old_reading_is_not_shown_as_now_and_idle_billing_still_warns(i
         await settle(app, pilot)
         row = cells(app.query_one(Runtimes), 0)
         assert row["GPU"].endswith("–") and row["State"].startswith("idle")
+        assert app.query_one(Runtimes).get_cell(G4["endpoint"], "State").style == ORANGE  # the warning, not plain idle
         panel = app.query_one(RuntimePanel)
         assert str(panel.query_one(".plot-label").render()).startswith("–")
         assert "still billing" in str(panel.query_one(".facts").render())

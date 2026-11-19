@@ -494,7 +494,7 @@ class Dashboard(App):
         A runtime whose last read is still out gets a gap for this tick, so
         every tick leaves one entry per runtime and the graph keeps time.
         """
-        if not self.snapshot:
+        if not self.snapshot or not self.is_running:  # quitting takes the widgets down before it stops timers
             return
         now = utc_now()
         for r in self.snapshot.runtimes:
