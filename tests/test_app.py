@@ -21,6 +21,7 @@ from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, account_
 from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
+from textual.content import Content
 
 from cotop.widgets import ORANGE, RED, sparkline
 from cotop.model import Account, History, KernelState, PastSession, RateBook, Resources, Snapshot, Status, Unreachable, parse_json, runtimes_from, utc_now
@@ -150,6 +151,17 @@ async def test_an_error_message_is_shown_as_text_not_markup(isolated):
         await settle(app, pilot)
         await pilot.pause(0.2)
         assert any("ValueError: unexpected '[/]' in the reply." in str(n.message) for n in app._notifications)
+        assert app.is_running
+
+
+async def test_a_kernel_state_or_command_is_shown_as_text_not_markup(isolated):
+    """The panel's border shows the kernel state as the server reports it, and the CLI's command, verbatim."""
+    colab = StubColab([G4], {G4["endpoint"]: status("[/]")}, {}, rate=10.05)
+    colab.local = {"train": {**LOCAL["train"], "running": "run([b]x.py)"}}
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        assert Content.from_markup(app.query_one(RuntimePanel).border_subtitle).plain == "[/]  run([b]x.py)"
         assert app.is_running
 
 

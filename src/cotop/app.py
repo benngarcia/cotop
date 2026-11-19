@@ -172,8 +172,9 @@ class RuntimePanel(Vertical):
     def show(self, r: Runtime, s: Snapshot, rates: RateBook) -> None:
         now = s.taken_at
         latest = self.samples.latest(r.endpoint, utc_now())
-        self.border_title = f"{r.label}  {r.hardware}{' high-RAM' if r.shape == 'HIGH_RAM' else ''}"
-        self.border_subtitle = state_text(r, now, latest).plain + (f"  {r.running}" if r.running else "")
+        # Text, not markup: a name, a command or a kernel state can hold "[/]"
+        self.border_title = Text(f"{r.label}  {r.hardware}{' high-RAM' if r.shape == 'HIGH_RAM' else ''}")
+        self.border_subtitle = Text(state_text(r, now, latest).plain + (f"  {r.running}" if r.running else ""))
         self.show_readings(r)
 
         rate = rates.rate(r, s)
