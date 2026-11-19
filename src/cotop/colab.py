@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -84,9 +85,14 @@ class Colab:
         return History.load(CLI_HOME / "history")
 
     def status(self, assignments: list[dict]) -> dict[str, Status | Exception]:
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = pool.map(_runtime_status, assignments)
-            return {a["endpoint"]: s for a, s in zip(assignments, results)}
+        """Every runtime at once, each on a daemon thread: a pool's threads would hold up quitting until their reads return."""
+        statuses = {}
+        readers = [threading.Thread(target=lambda a=a: statuses.update({a["endpoint"]: _runtime_status(a)}), daemon=True) for a in assignments]
+        for reader in readers:
+            reader.start()
+        for reader in readers:
+            reader.join()
+        return statuses
 
     def resources(self, runtimes: list[Runtime]) -> dict[str, Resources | None]:
         """One reading per runtime; a failed read is None, a gap in the graph."""
@@ -107,12 +113,15 @@ def still_assigned(runtime: Runtime, assignments: list[dict], local: dict[str, d
 
 
 def _cli(command: Command, name: str) -> str:
-    """Run a colab CLI command; its last output line is the result to show."""
-    done = subprocess.run(colab_argv(command, name), capture_output=True, text=True, timeout=180)
-    lines = (done.stdout + done.stderr).strip().splitlines()
-    if done.returncode != 0:
-        raise RuntimeError(lines[-1] if lines else f"colab {command} exited {done.returncode}")
-    return lines[-1] if lines else f"colab {command} done"
+    """Run a colab CLI command with no stdin, so a prompt fails instead of waiting unseen behind the dashboard.
+
+    The CLI says what happened on stdout; stderr holds warnings, or the traceback when it crashes.
+    """
+    done = subprocess.run(colab_argv(command, name), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+    out, err = done.stdout.strip().splitlines(), done.stderr.strip().splitlines()
+    if done.returncode != 0 or (out and out[-1].endswith("not found.")):  # `colab stop` exits 0 for a name it doesn't know
+        raise RuntimeError((out or err or [f"colab {command} exited {done.returncode}"])[-1])
+    return out[-1] if out else f"colab {command} done"
 
 
 def _proxy_get(url: str, token: str, path: str, timeout: float):
