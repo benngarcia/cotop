@@ -9,9 +9,12 @@ import pytest
 from cotop.model import (
     Account,
     History,
+    Basis,
+    Rate,
     RateBook,
     Resources,
     Samples,
+    Snapshot,
     Status,
     UsageLog,
     parse_json,
@@ -21,6 +24,12 @@ from cotop.model import (
 
 NOW = datetime(2026, 11, 17, 22, 0, tzinfo=timezone.utc)
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def snapshot(runtimes, rate, count=None):
+    """What one poll read: the account's rate and count, then the runtime list."""
+    count = len(runtimes) if count is None else count
+    return Snapshot(NOW, Account.parse("me@example.com", ccu(rate, count)), runtimes, History({}))
 
 
 def ccu(rate, count):
@@ -116,37 +125,35 @@ def test_account_reads_eligible_hardware_and_runway():
 
 
 def test_single_runtime_gets_the_reported_account_rate(tmp_path):
-    a = Account.parse("me@example.com", ccu(10.05, 1))
     [r] = runtimes = runtimes_from([G4], LOCAL, {G4["endpoint"]: status()})
     assert (r.name, r.hardware, r.shape, r.running, r.token) == ("train", "G4", "STANDARD", "run(train.py)", "t")
-    rate = RateBook(tmp_path / "r.json").rate(r, runtimes, a)
-    assert (rate.hourly, rate.basis) == (10.05, "reported")
+    rate = RateBook(tmp_path / "r.json").rate(r, snapshot(runtimes, 10.05))
+    assert (rate.hourly, rate.basis) == (10.05, Basis.REPORTED)
     assert "token=" not in repr(r)  # the proxy token never reaches a log line or the screen
 
 
 def test_mixed_hardware_does_not_give_every_row_the_account_total(tmp_path):
-    a = Account.parse("me@example.com", ccu(11.89, 2))
-    runtimes = runtimes_from([G4, T4], LOCAL, {})
+    s = snapshot(runtimes_from([G4, T4], LOCAL, {}), 11.89)
     book = RateBook(tmp_path / "r.json")
-    assert [book.rate(r, runtimes, a).basis for r in runtimes] == ["unknown", "unknown"]
+    assert [book.rate(r, s).basis for r in s.runtimes] == [Basis.UNKNOWN, Basis.UNKNOWN]
 
-    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
-    book.observe(Account.parse("me@example.com", ccu(3.68, 2)), runtimes_from([T4, T4], {}, {}))
-    assert [book.rate(r, runtimes, a).hourly for r in runtimes] == [10.05, 1.84]
+    for alone in (snapshot(runtimes_from([G4], LOCAL, {}), 10.05), snapshot(runtimes_from([T4, T4], {}, {}), 3.68)):
+        book.observe(alone)
+        book.observe(alone)  # the next poll agrees
+    assert [book.rate(r, s).hourly for r in s.runtimes] == [10.05, 1.84]
     assert RateBook(tmp_path / "r.json").rates == {"G4/STANDARD": 10.05, "T4/STANDARD": 1.84}
 
 
 def test_rate_book_learns_nothing_from_a_mixed_set(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    book.observe(Account.parse("me@example.com", ccu(11.89, 2)), runtimes_from([G4, T4], LOCAL, {}))
+    book.observe(snapshot(runtimes_from([G4, T4], LOCAL, {}), 11.89))
     assert book.rates == {}
 
 
 def test_same_kind_runtimes_split_the_total(tmp_path):
-    a = Account.parse("me@example.com", ccu(3.68, 2))
-    runtimes = runtimes_from([T4, assignment("gpu-t4-s-def", "T4")], {}, {})
-    rate = RateBook(tmp_path / "r.json").rate(runtimes[0], runtimes, a)
-    assert (rate.hourly, rate.basis) == (1.84, "split")
+    s = snapshot(runtimes_from([T4, assignment("gpu-t4-s-def", "T4")], {}, {}), 3.68)
+    rate = RateBook(tmp_path / "r.json").rate(s.runtimes[0], s)
+    assert (rate.hourly, rate.basis) == (1.84, Basis.SPLIT)
 
 
 def test_untracked_and_unreachable_runtimes():
@@ -184,7 +191,7 @@ def test_burn_is_measured_between_settled_steps(tmp_path):
         log.record(start + timedelta(minutes=5 * i + 2), 100.0 - 0.84 * i, 10.05)
         log.record(start + timedelta(minutes=5 * i + 3), 100.0 - 0.84 * i, 10.05)  # unchanged, not stored
     assert len(log.samples) == 6
-    assert log.burn(NOW) == pytest.approx(10.08)
+    assert log.burn(start + timedelta(minutes=30)) == pytest.approx(10.08)  # three minutes after the last step
     assert UsageLog(tmp_path / "u.jsonl").samples == log.samples
 
 
@@ -195,6 +202,28 @@ def test_burn_ignores_top_ups_and_short_windows(tmp_path):
     assert log.burn(NOW) is None  # one settled step is not a rate
     log.record(NOW - timedelta(minutes=10), 600.0, 10.0)
     assert log.burn(NOW) is None
+
+
+def test_a_top_up_in_the_window_counts_as_no_charge_not_a_refund(tmp_path):
+    log = UsageLog(tmp_path / "u.jsonl")
+    balance = 200.0
+    log.record(NOW - timedelta(minutes=58), balance, 15.0)  # baseline
+    for k in range(1, 12):  # 1.25 every 5 minutes is 15 an hour
+        balance += 10.0 - 1.25 if k == 6 else -1.25  # 10 arrive in the sixth step
+        log.record(NOW - timedelta(minutes=58 - 5 * k), balance, 15.0)
+    # the top-up's step hides its own charge, so nine steps' charge over the 50 minutes: a floor
+    assert log.burn(NOW) == pytest.approx(9 * 1.25 / (50 / 60))
+
+
+def test_burn_after_a_stop_counts_the_quiet_time_since(tmp_path):
+    log = UsageLog(tmp_path / "u.jsonl")
+    log.record(NOW - timedelta(minutes=59), 300.0, 15.0)  # baseline
+    for k in range(10):  # 0.5 every 2 minutes is 15 an hour, from -58m to -40m
+        log.record(NOW - timedelta(minutes=58 - 2 * k), 299.5 - 0.5 * k, 15.0)
+    log.record(NOW - timedelta(minutes=39), 295.0, 0.0)  # stopped
+    assert log.burn(NOW - timedelta(minutes=39)) == pytest.approx(15.0)  # a step may still be on its way
+    # no step for 40 minutes against 2-minute steps: 4.5 charged from -58m until one step after the last
+    assert log.burn(NOW) == pytest.approx(4.5 / (56 / 60))
 
 
 def watch(log, start, end, balance, rate):
@@ -271,11 +300,53 @@ def test_billing_starts_at_assignment_not_vm_boot(tmp_path):
     assert browser.billed_for(NOW) == (status().uptime(NOW), False)  # VM boot: an upper bound
 
 
+def test_a_read_that_straddles_a_start_or_stop_gives_no_exact_rate(tmp_path):
+    """The count says the account's rate covers other runtimes than the ones listed."""
+    [t4] = runtimes = runtimes_from([T4], {}, {})
+    straddling = [snapshot(runtimes, 16.81, count=2), snapshot(runtimes, 0.0, count=0)]
+    assert [RateBook(tmp_path / "r.json").rate(t4, s) for s in straddling] == [Rate(None, Basis.UNKNOWN)] * 2
+    (tmp_path / "r.json").write_text('{"T4/STANDARD": 1.84}')
+    assert [RateBook(tmp_path / "r.json").rate(t4, s) for s in straddling] == [Rate(1.84, Basis.LEARNED)] * 2
+
+
+def test_spend_is_an_upper_bound_only_when_rate_and_time_both_are():
+    since_boot, since_assignment = (timedelta(hours=2), False), (timedelta(hours=2), True)
+    assert Rate(1.5, Basis.REPORTED).spend(since_boot) == (3.0, "≤")
+    assert Rate(1.5, Basis.REPORTED).spend(since_assignment) == (3.0, "≈")  # billing may start at VM boot
+    assert Rate(1.5, Basis.LEARNED).spend(since_boot) == (3.0, "≈")  # a learned rate can be low
+    assert Rate(0.0, Basis.REPORTED).spend(since_boot) == (0.0, "≤")
+    assert Rate(None, Basis.UNKNOWN).spend(since_boot) is None
+
+
 def test_rate_book_skips_reads_that_straddle_a_start_or_stop(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    book.observe(Account.parse("me@example.com", ccu(11.89, 2)), runtimes_from([G4], LOCAL, {}))
-    book.observe(Account.parse("me@example.com", ccu(0, 1)), runtimes_from([G4], LOCAL, {}))
+    for straddling in (snapshot(runtimes_from([G4], LOCAL, {}), 11.89, count=2), snapshot(runtimes_from([G4], LOCAL, {}), 0, count=1)):
+        book.observe(straddling)
+        book.observe(straddling)
     assert book.rates == {}
+
+
+def test_a_kind_swap_between_the_reads_teaches_nothing(tmp_path):
+    """An H100 stops and a T4 starts between the account read and the list: the count still matches."""
+    book = RateBook(tmp_path / "r.json")
+    h100, t4 = runtimes_from([assignment("gpu-h100-s-x", "H100")], {}, {}), runtimes_from([T4], {}, {})
+    for s in (snapshot(h100, 15.04), snapshot(h100, 15.04), snapshot(t4, 15.04)):
+        book.observe(s)
+    assert RateBook(tmp_path / "r.json").rates == {"H100/STANDARD": 15.04}
+    book.observe(snapshot(t4, 1.84))
+    book.observe(snapshot(t4, 1.84))  # two polls in a row agree
+    assert RateBook(tmp_path / "r.json").rates == {"H100/STANDARD": 15.04, "T4/STANDARD": 1.84}
+
+
+def test_learned_rates_are_scaled_to_add_up_to_the_account_total(tmp_path):
+    (tmp_path / "r.json").write_text('{"G4/STANDARD": 5.0, "T4/STANDARD": 1.0}')  # learned when both cost less
+    book = RateBook(tmp_path / "r.json")
+    s = snapshot(runtimes_from([G4, T4], LOCAL, {}), 12.0)
+    assert [book.rate(r, s) for r in s.runtimes] == [Rate(10.0, Basis.LEARNED), Rate(2.0, Basis.LEARNED)]
+    straddling = snapshot(s.runtimes, 12.0, count=3)  # the total covers a runtime not listed
+    assert [book.rate(r, straddling).hourly for r in s.runtimes] == [5.0, 1.0]
+    partly_known = snapshot(runtimes_from([G4, T4, CPU], LOCAL, {}), 12.0)  # the CPU's share is not known
+    assert [book.rate(r, partly_known).hourly for r in partly_known.runtimes] == [5.0, 1.0, None]
 
 
 def test_past_session_is_live_only_while_its_endpoint_is_assigned(tmp_path):
@@ -287,9 +358,9 @@ def test_past_session_is_live_only_while_its_endpoint_is_assigned(tmp_path):
         + '{"timestamp": "2026-11-17T19:30:00+00:00", "event_type": "session_terminated", "reason": "pruned"}\n'
     )
     a, b, c = History.load(tmp_path).past_sessions()
-    assert a.lasted(NOW, {"live-ep"}) == (timedelta(hours=1), "")
+    assert a.lasted(NOW, {"live-ep"}) == (timedelta(hours=1), True)
     assert b.lasted(NOW, {"live-ep"}) is None  # reclaimed without the CLI noticing
-    assert c.lasted(NOW, {"live-ep"}) == (timedelta(minutes=30), "≤")
+    assert c.lasted(NOW, {"live-ep"}) == (timedelta(minutes=30), False)  # pruned: an upper bound
 
 
 def test_idle_counts_only_since_assignment(tmp_path):
@@ -341,7 +412,7 @@ def test_a_balance_that_is_not_a_number_never_reaches_the_usage_log(tmp_path):
             log.record(NOW, balance, rate)
     for minutes, balance in ((10, 5229.0), (20, 5227.3), (30, 5225.6)):
         log.record(NOW - timedelta(minutes=60 - minutes), balance, 10.05)
-    assert log.burn(NOW) == pytest.approx(10.2)
+    assert log.burn(NOW - timedelta(minutes=25)) == pytest.approx(10.2)  # five minutes after the last step
 
 
 def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_path):
@@ -357,10 +428,12 @@ def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_pat
 
     book = RateBook(tmp_path / "cache" / "r.json")
     (tmp_path / "cache" / "r.json").mkdir()
-    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    g4 = snapshot(runtimes_from([G4], LOCAL, {}), 10.05)
+    book.observe(g4)
+    book.observe(g4)
     assert isinstance(book.unsaved, OSError)
     (tmp_path / "cache" / "r.json").rmdir()
-    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    book.observe(g4)
     assert book.unsaved is None and RateBook(tmp_path / "cache" / "r.json").rates == {"G4/STANDARD": 10.05}
 
 
@@ -416,13 +489,6 @@ def test_a_wrong_type_is_turned_away_where_it_is_parsed(parse):
     """Fixed cases for what the fuzz target finds only on some draws."""
     with pytest.raises(ValueError):
         parse()
-
-
-def test_a_runway_too_long_for_a_date_is_not_an_account():
-    """timedelta and the "until" date overflow long before a finite balance or rate does."""
-    for balance, rate in ((5227.43, 5e-324), (1e6, 1e-6), (-1e300, 1.0)):
-        with pytest.raises(ValueError, match="is not an account"):
-            Account.parse("me@example.com", {"currentBalance": balance, "consumptionRateHourly": rate, "assignmentsCount": 1})
 
 
 def test_history_skips_lines_it_cannot_read(tmp_path):

@@ -61,12 +61,17 @@ for over 10 minutes is a gap in the graph.
 ## Estimates
 
 Colab reports only the account's total hourly rate, never a per-runtime rate.
-The `CU/hr` column is therefore:
+It reports the total and the runtime list in two requests, and a runtime can
+start or stop between them. When the account's `assignmentsCount` differs
+from the number of runtimes listed, the total covers other runtimes than the
+list, and cotop splits nothing from it. The `CU/hr` column is therefore:
 
-- **exact** when there is one runtime;
+- **exact** when there is one runtime and both reads agree;
 - **≈ split** when every runtime is the same hardware: total ÷ count;
-- **≈ learned** from `~/.cache/cotop/rates.json`, which records each hardware kind's rate
-  whenever only that kind is running;
+- **≈ learned** from `~/.cache/cotop/rates.json`, which records each hardware
+  kind's rate whenever only that kind is running and two polls in a row agree
+  on the runtimes and the total. When every kind running is learned and both
+  reads agree, the learned rates are scaled so the rows add up to the total;
 - **?** otherwise.
 
 Colab boots VMs before it assigns them. One G4 runtime booted 21 minutes
@@ -75,11 +80,24 @@ assignment time in the CLI history. For a runtime the CLI did not start,
 the VM's boot time is the only start time available. That figure is an upper
 bound, shown as `≤`.
 
+Spend is the rate times that time. It is `≤` only when both parts are bounds:
+an exact rate over time since VM boot. Every other spend is `≈`, including an
+exact rate over time since assignment, because billing may start at boot (see
+[Not verified](#not-verified)).
+
+The header says "nothing running" only when no runtime is listed, the account
+counts none, and its rate is 0. Past six days it gives the date the balance
+runs out, and past a year it says "over N years".
+
 Colab settles the balance in steps a few minutes apart, so a sample taken
 every 15 seconds shows no change for minutes at a time. "Charged last hour" is
-the fall in balance between the first and last settled step in the past hour,
-logged in `~/.cache/cotop/usage.jsonl`. You can compare it with the rate
-Colab reports.
+the sum of the falls in balance between settled steps in the past hour,
+logged in `~/.cache/cotop/usage.jsonl`, over the time from the first settled
+step to the last. A step in which the balance rose, such as a top-up, counts
+as no charge, so while one is in the hour the figure is a floor. When no step
+has come for longer than the longest gap between steps, nothing is being
+charged, as after a stop, and that time counts too. You can compare the figure
+with the rate Colab reports.
 
 ## Watching did not keep an idle runtime alive
 

@@ -17,13 +17,13 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import cotop.colab
-from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, Snapshot, account_text, meters, state_text
+from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, account_text, meters, state_text
 from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
 
 from cotop.widgets import RED, sparkline
-from cotop.model import Account, History, PastSession, RateBook, Resources, Status, parse_json, runtimes_from, utc_now
+from cotop.model import Account, History, PastSession, RateBook, Resources, Snapshot, Status, parse_json, runtimes_from, utc_now
 from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 
@@ -272,7 +272,7 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
         rows = [[str(c) for c in table.get_row_at(i)] for i in range(2)]
         assert [r[:2] + r[3:] for r in rows] == [  # all but Started, which is local time
             ["train", "G4", "1h00m", "≈10.0", "running"],
-            ["old", "G4", "≤1h00m", "≤10.0", "gone"],
+            ["old", "G4", "≤1h00m", "≈10.0", "gone"],  # a learned rate: no bound, though the time is one
         ]
 
 
@@ -291,19 +291,55 @@ async def test_the_activity_panel_shows_history_without_code(isolated, tmp_path)
 
 
 async def test_estimates_and_upper_bounds_are_marked_and_spend_is_rate_times_time(isolated):
-    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤."""
+    """README: an estimated rate is marked ≈, and time since VM boot is an upper bound, ≤.
+    An estimated rate over a bound is still an estimate: a split can be off either way."""
     t4 = assignment("gpu-t4-s-def", "T4")
     colab = StubColab([T4, t4], {T4["endpoint"]: status(), t4["endpoint"]: status()}, {}, rate=3.68)
     app = Dashboard(colab, isolated)
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         up = app.snapshot.taken_at - status().started  # untracked: billed since VM boot at most
-        spent = f"≤{1.84 * up.total_seconds() / 3600:.1f}"
+        spent = f"≈{1.84 * up.total_seconds() / 3600:.1f}"
         table = app.query_one(Runtimes)
         cells = {column: str(table.get_row_at(0)[i]) for i, column in enumerate(table.columns)}
         assert (cells["CU/hr"], cells["Spent"], cells["Up"][0]) == ("≈1.84", spent, "≤")
         facts = str(app.query_one(RuntimePanel).query_one(".facts").render())
         assert f"spent {spent}  at ≈1.84/hr" in facts and "up ≤" in facts
+
+
+def cells(table, row):
+    return {column: str(value) for column, value in zip(table.columns, table.get_row_at(row))}
+
+
+@pytest.mark.parametrize(
+    "rate,count,shown",
+    [
+        (16.81, 2, ("?", "?")),  # the account was read before another runtime stopped
+        (0.0, 0, ("?", "?")),  # ...or before this one started
+        (0.0, 1, ("0.00", "≤0.0")),  # both reads agree: a runtime that costs nothing
+    ],
+)
+async def test_a_rate_is_exact_only_when_both_reads_cover_the_same_runtimes(isolated, rate, count, shown):
+    colab = StubColab([T4], {T4["endpoint"]: status()}, {}, rate=rate)
+    colab.ccu_info = lambda: ccu(rate, count)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        row = cells(app.query_one(Runtimes), 0)
+        assert (row["CU/hr"], row["Spent"]) == shown
+        header = str(app.query_one("#usage-text").render())
+        assert "nothing running" not in header and f"{rate:.2f} an hour" in header  # a runtime is listed
+
+
+async def test_rows_add_up_to_the_account_rate_and_spend_on_a_learned_rate_is_no_bound(isolated):
+    learned(isolated, {"G4/STANDARD": 5.0, "T4/STANDARD": 1.0})  # learned when both cost less
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    colab.local = {}  # both opened in a browser: billed since VM boot at most
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        rows = [cells(app.query_one(Runtimes), i) for i in range(2)]
+        assert [(r["CU/hr"], r["Spent"][0]) for r in rows] == [("≈9.91", "≈"), ("≈1.98", "≈")]
 
 
 async def test_a_failed_reading_is_kept_as_a_gap(isolated):
@@ -313,10 +349,6 @@ async def test_a_failed_reading_is_kept_as_a_gap(isolated):
         app.add_readings(utc_now(), {G4["endpoint"]: resources(0.5)})
         app.add_readings(utc_now(), {G4["endpoint"]: ConnectionError("proxy said 502")})
         assert app.samples.series(G4["endpoint"], lambda r: r.gpu_utilization)[-2:] == [0.5, None]
-
-
-def cells(table, row):
-    return {column: str(value) for column, value in zip(table.columns, table.get_row_at(row))}
 
 
 async def test_an_old_reading_is_not_shown_as_now_and_idle_billing_still_warns(isolated):
@@ -775,100 +807,6 @@ async def test_a_vanished_selection_stays_on_its_row_and_x_follows_it(isolated):
         assert colab.calls == [("ssh", after[2])]
 
 
-QUIT_WHILE_A_PROXY_STALLS = """
-import pathlib, tempfile, time
-import cotop.colab
-from cotop.app import Dashboard
-from tests.test_app import StubColab
-from tests.test_model import G4, status
-
-colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-colab.status = cotop.colab.Colab(None).status
-app = Dashboard(colab, pathlib.Path(tempfile.mkdtemp()))
-
-def stalled(assignment):
-    app.call_from_thread(app.exit)  # q, pressed while this read waits
-    time.sleep(60)
-
-cotop.colab._runtime_status = stalled
-app.run(headless=True)
-"""
-
-
-def test_quitting_does_not_wait_for_a_read_in_flight():
-    """A runtime proxy stalled mid-poll must not hold the terminal after q. Python joins pool threads and
-    non-daemon threads before the process exits, so this runs as its own process."""
-    import subprocess
-    import sys
-    from pathlib import Path
-
-    subprocess.run([sys.executable, "-c", QUIT_WHILE_A_PROXY_STALLS], cwd=Path(__file__).parents[1], timeout=15, check=True)
-
-
-async def test_a_stuck_refresh_is_reported_and_the_header_turns_stale(isolated, monkeypatch):
-    """A poll that never returns (the CLI's lock read waits for weeks) must not leave old figures looking current."""
-    import threading
-
-    import cotop.app
-
-    monkeypatch.setattr(cotop.app, "POLL_DEADLINE", 0.5)
-    monkeypatch.setattr(cotop.app, "STALE", timedelta(seconds=1))
-    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    app = Dashboard(colab, isolated)
-    stuck = threading.Event()
-    async with app.run_test(size=(150, 46)) as pilot:
-        await settle(app, pilot)
-        usage = app.query_one("Usage")
-        assert "updated" in usage.border_title and "stale" not in usage.border_title
-        colab.sessions = lambda: stuck.wait(10)
-        await pilot.press("r")
-        await pilot.pause(1.2)
-        assert any("still reading after 0.5 s" in str(n.message) for n in app._notifications)
-        usage.show_age()  # what its one-second timer does
-        assert "stale, updated" in usage.border_title
-        stuck.set()
-
-
-async def test_keys_typed_while_x_checks_the_name_answer_nothing(isolated):
-    """The check blocks the loop; `s y` typed then would stop the runtime before its prompt was drawn."""
-    from textual import events
-
-    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    app = Dashboard(colab, isolated)
-
-    def ssh_command(runtime):
-        for key in "sy":  # what the driver's input thread does with keys read meanwhile
-            app._driver.send_message(events.Key(key, key))
-        raise RuntimeError("train is no longer this runtime; refresh and retry")
-
-    colab.ssh_command = ssh_command
-    async with app.run_test(size=(150, 46)) as pilot:
-        await settle(app, pilot)
-        await pilot.press("x")
-        await settle(app, pilot)
-        assert colab.calls == [] and app.screen is app.screen_stack[0]
-        await pilot.press("s")  # typed after: works
-        assert "Stop train" in str(app.screen.query_one("Label").render())
-
-
-async def test_a_read_that_returns_while_cotop_quits_touches_no_widgets(isolated):
-    """Textual takes the screens down before it cancels workers; a read landing in between must not show anything."""
-    import time
-
-    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    app = Dashboard(colab, isolated)
-    async with app.run_test(size=(150, 46)) as pilot:
-        await settle(app, pilot)
-
-        def returns_as_cotop_quits():
-            while app.is_running:
-                time.sleep(0.001)
-            return ccu(10.05, 1)
-
-        colab.ccu_info = returns_as_cotop_quits
-        app.action_refresh()
-
-
 # Wire data Colab could send, through the real Colab class: only the HTTP edge is faked.
 
 WIRE = {
@@ -1033,10 +971,21 @@ async def test_an_unwritable_cache_is_reported_once_and_the_dashboard_keeps_draw
         assert [n.severity for n in app._notifications if "Can't save" in str(n.message)] == ["warning"]
 
 
-def test_a_large_balance_on_one_cpu_runtime_still_draws():
-    """The runway bound only keeps the end date inside a datetime; a real account never reaches it."""
-    a = Account.parse("me@example.com", {"currentBalance": 500_000, "consumptionRateHourly": 0.07, "assignmentsCount": 1})
-    assert "until" in account_text(a, NOW, None).plain
+def test_the_runway_reads_right_from_none_left_to_centuries():
+    def pace(balance, rate):
+        a = Account.parse("me@example.com", {"currentBalance": balance, "consumptionRateHourly": rate, "assignmentsCount": 1})
+        return account_text(Snapshot(NOW, a, [], History({})), None).plain.splitlines()[1]
+
+    def end(hours):
+        return (NOW + timedelta(hours=hours)).astimezone()
+
+    assert pace(100.0, 10.0) == f"10.00 an hour, lasts 10h00m until {end(10):%a %H:%M}"
+    assert pace(5227.43, 1.76) == f"1.76 an hour, lasts 123d18h until {end(5227.43 / 1.76):%b %-d}"  # a weekday would repeat
+    assert pace(-3.5, 1.76) == "1.76 an hour, none left"
+    assert pace(-1e300, 1.0) == "1.00 an hour, none left"
+    assert pace(10.0, 0.0) == "0.00 an hour"
+    assert pace(500_000, 0.07) == "0.07 an hour, lasts over 815 years"  # one CPU runtime
+    assert pace(5227.43, 5e-324) == pace(1e308, 1e-308) == "0.00 an hour, lasts over 1000 years"  # past any date
 
 
 # Fuzz: any value Colab could put at any place in a reply either fails its parse or draws.
@@ -1104,8 +1053,9 @@ def test_every_value_that_parses_draws(data):
         assert type(account.email) is str and all(type(n) is str for n in account.eligible_gpus + account.eligible_tpus)
         assert all(type(n) in (int, float) and math.isfinite(n) for n in (account.balance, account.rate_hourly))
         assert is_whole(account.assignments_count)
-        account_text(account, NOW, None)
-        list(HistoryScreen(Snapshot(NOW, account, runtimes or [], History({})), RateBook(Path("/nonexistent/rates.json"))).compose())
+        s = Snapshot(NOW, account, runtimes or [], History({}))
+        account_text(s, None)
+        list(HistoryScreen(s, RateBook(Path("/nonexistent/rates.json"))).compose())
     if reading:
         assert all(is_whole(n) for n in (reading.memory_total, reading.memory_free, reading.disk_total, reading.disk_used))
         assert all(type(g.name) is str and (g.utilization is None or is_fraction(g.utilization)) for g in reading.gpus)
@@ -1119,3 +1069,97 @@ def test_every_value_that_parses_draws(data):
         assert all(type(v) is str for v in (r.endpoint, r.accelerator, r.shape, r.token)) and (r.url is None or type(r.url) is str)
         r.concerns(NOW, reading)
         state_text(r, NOW, reading)
+
+
+QUIT_WHILE_A_PROXY_STALLS = """
+import pathlib, tempfile, time
+import cotop.colab
+from cotop.app import Dashboard
+from tests.test_app import StubColab
+from tests.test_model import G4, status
+
+colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+colab.status = cotop.colab.Colab(None).status
+app = Dashboard(colab, pathlib.Path(tempfile.mkdtemp()))
+
+def stalled(assignment):
+    app.call_from_thread(app.exit)  # q, pressed while this read waits
+    time.sleep(60)
+
+cotop.colab._runtime_status = stalled
+app.run(headless=True)
+"""
+
+
+def test_quitting_does_not_wait_for_a_read_in_flight():
+    """A runtime proxy stalled mid-poll must not hold the terminal after q. Python joins pool threads and
+    non-daemon threads before the process exits, so this runs as its own process."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    subprocess.run([sys.executable, "-c", QUIT_WHILE_A_PROXY_STALLS], cwd=Path(__file__).parents[1], timeout=15, check=True)
+
+
+async def test_a_stuck_refresh_is_reported_and_the_header_turns_stale(isolated, monkeypatch):
+    """A poll that never returns (the CLI's lock read waits for weeks) must not leave old figures looking current."""
+    import threading
+
+    import cotop.app
+
+    monkeypatch.setattr(cotop.app, "POLL_DEADLINE", 0.5)
+    monkeypatch.setattr(cotop.app, "STALE", timedelta(seconds=1))
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    stuck = threading.Event()
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        usage = app.query_one("Usage")
+        assert "updated" in usage.border_title and "stale" not in usage.border_title
+        colab.sessions = lambda: stuck.wait(10)
+        await pilot.press("r")
+        await pilot.pause(1.2)
+        assert any("still reading after 0.5 s" in str(n.message) for n in app._notifications)
+        usage.show_age()  # what its one-second timer does
+        assert "stale, updated" in usage.border_title
+        stuck.set()
+
+
+async def test_keys_typed_while_x_checks_the_name_answer_nothing(isolated):
+    """The check blocks the loop; `s y` typed then would stop the runtime before its prompt was drawn."""
+    from textual import events
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+
+    def ssh_command(runtime):
+        for key in "sy":  # what the driver's input thread does with keys read meanwhile
+            app._driver.send_message(events.Key(key, key))
+        raise RuntimeError("train is no longer this runtime; refresh and retry")
+
+    colab.ssh_command = ssh_command
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert colab.calls == [] and app.screen is app.screen_stack[0]
+        await pilot.press("s")  # typed after: works
+        assert "Stop train" in str(app.screen.query_one("Label").render())
+
+
+async def test_a_read_that_returns_while_cotop_quits_touches_no_widgets(isolated):
+    """Textual takes the screens down before it cancels workers; a read landing in between must not show anything."""
+    import time
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+
+        def returns_as_cotop_quits():
+            while app.is_running:
+                time.sleep(0.001)
+            return ccu(10.05, 1)
+
+        colab.ccu_info = returns_as_cotop_quits
+        app.action_refresh()
