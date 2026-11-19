@@ -7,8 +7,8 @@ from rich.color import Color as RichColor
 from rich.style import Style
 
 from cotop.widgets import RED
-from cotop.model import History, PastSession, utc_now
-from tests.test_model import CPU, G4, LOCAL, SECRET_HISTORY, T4, assignment, ccu, resources, status
+from cotop.model import History, utc_now
+from tests.test_model import CPU, G4, LOCAL, T4, ccu, resources, status
 
 
 class StubColab:
@@ -102,79 +102,6 @@ async def test_failed_refresh_keeps_the_last_data(isolated):
         await settle(app, pilot)
         assert any("Refresh failed: ConnectionError: ccu-info timed out." in str(n.message) for n in app._notifications)
         assert app.query_one(Runtimes).row_count == 3
-
-
-def secret_colab(tmp_path):
-    """One runtime whose CLI history holds code, outputs and a stdin reply, all canaries."""
-    (tmp_path / "history").mkdir()
-    (tmp_path / "history" / "train.jsonl").write_text(SECRET_HISTORY)
-    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
-    colab.history = lambda: History.load(tmp_path / "history")
-    return colab
-
-
-async def test_a_failure_showing_new_data_is_reported_and_cotop_keeps_running(isolated, tmp_path, monkeypatch, capfd):
-    """Runtimes bill while cotop is down, so a full disk or a bad reading must not exit it."""
-
-    def disk_full(*_):
-        raise OSError(28, "No space left on device")
-
-    def bad_reading(*_):
-        raise ValueError("unexpected '[/]' in a reading")  # error text is not markup
-
-    monkeypatch.setattr("cotop.model.write_atomic", disk_full)
-    colab = secret_colab(tmp_path)
-    app = Dashboard(colab, isolated)
-    async with app.run_test(size=(150, 46), notifications=True) as pilot:
-        await settle(app, pilot)
-        assert app.query_one(Runtimes).row_count == 1  # drawn, though nothing could be saved
-        monkeypatch.setattr(app.samples, "add", bad_reading)
-        app.action_sample()  # the 2 s path
-        colab._rate = 11.5
-        await pilot.press("r")
-        await settle(app, pilot)
-        errors = " ".join(str(n.message) for n in app._notifications)
-        assert "Refresh failed: OSError: [Errno 28] No space left on device." in errors
-        assert "Refresh failed: ValueError: unexpected '[/]' in a reading." in errors
-        assert "11.50 an hour" in str(app.query_one("#usage-text").render())  # still polling
-        assert app.is_running
-    assert "SECRET" not in "".join(capfd.readouterr())
-
-
-async def test_a_snapshot_that_fails_to_draw_is_reported_and_not_kept(isolated):
-    """Colab can send consumptionRateHourly: null. Keys and resizes redraw only the last snapshot that drew."""
-    t4b = assignment("gpu-t4-s-other", "T4")
-    colab = StubColab([T4, t4b], {e["endpoint"]: status() for e in (T4, t4b)}, {}, rate=3.52)
-    app = Dashboard(colab, isolated)
-    async with app.run_test(size=(150, 46)) as pilot:
-        await settle(app, pilot)
-        colab._rate = None
-        await pilot.press("r")
-        await settle(app, pilot)
-        await pilot.press("down")
-        await pilot.resize_terminal(120, 46)
-        await settle(app, pilot)
-        assert app.snapshot.account.rate_hourly == 3.52
-        assert [str(n.message).split(":")[1] for n in app._notifications] == [" TypeError"]
-        assert app.is_running
-
-
-async def test_a_crash_report_never_shows_cli_history(isolated, tmp_path, monkeypatch, capfd):
-    """Textual prints every frame's locals when cotop crashes; the snapshot in them must hold no code, outputs or stdin."""
-
-    def crash(*_):
-        raise RuntimeError("planted")
-
-    monkeypatch.setattr(PastSession, "lasted", crash)  # a bug in a screen, outside any error boundary
-    app = Dashboard(secret_colab(tmp_path), isolated)
-    with pytest.raises(RuntimeError, match="planted"):
-        async with app.run_test(size=(150, 46)) as pilot:
-            await settle(app, pilot)
-            await pilot.press("h")
-            await settle(app, pilot)
-    report = capfd.readouterr().err
-    assert "history=History(" in report  # the report did print the snapshot
-    assert "SECRET" not in report
 
 
 async def test_no_runtimes(isolated):

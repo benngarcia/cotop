@@ -471,13 +471,13 @@ class Dashboard(App):
         except Exception as e:
             self.call_from_thread(self.show_error, e)
             return
-        self.call_from_thread(self.apply, self.show, snapshot)
+        self.call_from_thread(self.show, snapshot)
 
     @work(thread=True)
     def sample(self, runtimes: list[Runtime]) -> None:
         at = utc_now()
         readings = self.colab.resources(runtimes)
-        self.call_from_thread(self.apply, self.add_readings, at, readings)
+        self.call_from_thread(self.add_readings, at, readings)
 
     def add_readings(self, at: datetime, readings: dict[str, Resources | None]) -> None:
         for endpoint, reading in readings.items():
@@ -488,28 +488,17 @@ class Dashboard(App):
 
     # Showing.
 
-    def apply(self, show, *args) -> None:
-        """Put new data on screen. A failure is reported there and never exits cotop: runtimes bill while it is down."""
-        try:
-            show(*args)
-        except Exception as e:
-            self.show_error(e)
-
     def show(self, s: Snapshot) -> None:
-        shown, self.snapshot = self.snapshot, s
-        try:
-            self.samples.keep_only({r.endpoint for r in s.runtimes})
-            self.query_one(Usage).show(s, self.usage)
-            # The table stays visible when empty: hiding a focused widget blurs it, and
-            # nothing would give the selection's only home its focus back.
-            self.query_one(Runtimes).show(s, self.rates, self.samples)
-            self.show_selected()
-        except Exception:
-            self.snapshot = shown  # keys, resizes and samples redraw only a snapshot that drew
-            raise
-        # Saved after drawing, so a full disk never hides the runtimes that are billing.
+        self.snapshot = s
         self.usage.record(s.taken_at, s.account.balance, s.account.rate_hourly)
         self.rates.observe(s.account, s.runtimes)
+        self.samples.keep_only({r.endpoint for r in s.runtimes})
+        self.query_one(Usage).show(s, self.usage)
+        # The table stays visible when empty: hiding a focused widget blurs it, and
+        # nothing would give the selection's only home its focus back.
+        table = self.query_one(Runtimes)
+        table.show(s, self.rates, self.samples)
+        self.show_selected()
 
     def show_selected(self) -> None:
         """Point the panel at the runtime under the table's cursor, the selection's only home."""
@@ -528,7 +517,7 @@ class Dashboard(App):
 
     def show_error(self, e: Exception) -> None:
         age = f" Showing data from {fmt_duration(utc_now() - self.snapshot.taken_at)} ago." if self.snapshot else ""
-        self.notify(f"Refresh failed: {type(e).__name__}: {e}.{age}", severity="error", timeout=POLL_SECONDS, markup=False)
+        self.notify(f"Refresh failed: {type(e).__name__}: {e}.{age}", severity="error", timeout=POLL_SECONDS)
 
     # Selection and actions.
 
