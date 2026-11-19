@@ -316,3 +316,8 @@ def test_the_demo_runs_without_the_cli_library(tmp_path):
     script = "import sys; sys.modules['colab_cli'] = None; from cotop.app import demo_dashboard; demo_dashboard(__import__('pathlib').Path(sys.argv[1]))"
     done = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+def test_a_runtime_without_a_proxy_yet_reads_as_that_not_a_crash():
+    [r] = runtimes_from([{k: v for k, v in G4.items() if k != "runtimeProxyInfo"}], {}, {})
+    assert str(colab.Colab(None).resources(r)) == "Colab has not given it a runtime proxy yet"

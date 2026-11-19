@@ -12,6 +12,15 @@ didn't start, the CLI client's `unassign` call.
 [SECURITY.md](../SECURITY.md#what-cotop-can-touch) lists the guarantees
 and the calls cotop makes into the CLI.
 
+Each reply is typed where cotop parses it, with the types Colab's VS Code
+extension uses (`src/colab/client/v1/api.ts` in colab-vscode): numbers are
+finite JSON numbers, never strings or booleans, and sizes are whole numbers of
+bytes. A value of the wrong type never reaches the screen. In the account or
+the runtime list, it fails the refresh, and a message names the value; the
+last data stays on screen. In a runtime's kernel status, it shows in that
+runtime's row. A runtime that Colab lists without a proxy yet shows as
+unreachable until Colab gives it one.
+
 `cotop --demo` runs on `src/cotop/demo.py`, a made-up account, and sends no
 requests at all.
 
@@ -22,7 +31,7 @@ requests at all.
 | Runtimes | `/tun/m/assignments` | Every VM the account holds, including ones opened in a browser. These show as *untracked* |
 | Runtime names, running command | `~/.config/colab-cli/sessions.json` | Read under the CLI's file lock and joined on `endpoint`. `colab sessions` and `colab status` prune and rewrite this file, and `colab stop`, which cotop runs on `s`, updates it |
 | Kernel state, idle time, clients | Runtime proxy `/api/kernels`, `/api/status` | Requests carry `?no_track_activity=1` |
-| GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. See [Readings](#readings) |
+| GPU, VRAM, RAM, disk | Runtime proxy `/api/colab/resources`, every 2 s | The same endpoint the Colab VS Code extension uses. The body has an XSSI prefix. Values change every second; a read takes about 0.4 s. A value of the wrong type fails the read. Utilization is a fraction from 0 to 1. See [Readings](#readings) |
 | Assignment time, recent events, past sessions | `~/.config/colab-cli/history/*.jsonl` | Code, outputs and prompt replies are dropped as each line is read; see [SECURITY.md](../SECURITY.md#guarantees) |
 
 ## Readings

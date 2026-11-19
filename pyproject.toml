@@ -33,7 +33,7 @@ Issues = "https://github.com/benngarcia/cotop/issues"
 cotop = "cotop.app:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1"]
+dev = ["hypothesis>=6", "pytest>=8", "pytest-asyncio>=1"]
 
 [build-system]
 requires = ["hatchling"]
