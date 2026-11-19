@@ -90,24 +90,27 @@ class Usage(Vertical):
         return [None if r is None else r / top for r in series]
 
     def show(self, s: Snapshot, log: UsageLog) -> None:
-        a, now = s.account, s.taken_at
-        self.border_title = a.email
-        runway = a.runway
-        low = runway is not None and runway < LOW_RUNWAY
-        left = Text.assemble((f"{a.balance:,.2f}", f"bold {RED}" if low else "bold"), (" compute units left", RED if low else ""))
-        if runway is None:
-            pace = Text("nothing running", style=DIM)
-        else:
-            pace = Text.assemble(
-                f"{a.rate_hourly:.2f} an hour, lasts ",
-                (fmt_duration(runway), f"bold {RED}" if low else "bold"),
-                (f" until {(now + runway).astimezone():%a %H:%M}", DIM),
-            )
-        burn = log.burn(now)
-        charged = Text(f"charged {burn:.2f} an hour over the last hour" if burn is not None else "", style=DIM)
-        self.query_one("#usage-text", Static).update(Text("\n").join([left, pace, charged]))
+        self.border_title = s.account.email
+        self.query_one("#usage-text", Static).update(account_text(s.account, s.taken_at, log.burn(s.taken_at)))
         self.query_one("#usage-graph", Graph).refresh()
         self.border_subtitle = "rate over 24h"
+
+
+def account_text(a: Account, now: datetime, burn: float | None) -> Text:
+    """What is left, how long it lasts, and what was really charged."""
+    runway = a.runway
+    low = runway is not None and runway < LOW_RUNWAY
+    left = Text.assemble((f"{a.balance:,.2f}", f"bold {RED}" if low else "bold"), (" compute units left", RED if low else ""))
+    if runway is None:
+        pace = Text("nothing running", style=DIM)
+    else:
+        pace = Text.assemble(
+            f"{a.rate_hourly:.2f} an hour, lasts ",
+            (fmt_duration(runway), f"bold {RED}" if low else "bold"),
+            (f" until {(now + runway).astimezone():%a %H:%M}", DIM),
+        )
+    charged = Text(f"charged {burn:.2f} an hour over the last hour" if burn is not None else "", style=DIM)
+    return Text("\n").join([left, pace, charged])
 
 
 class RuntimePanel(Vertical):
@@ -426,6 +429,7 @@ class Dashboard(App):
         self.polling: Worker | None = None
         self.refresh_pending = False  # asked for while a poll ran, which may predate the change
         self.sampling: Worker | None = None
+        self.unsaved_reported = False
 
     def compose(self) -> ComposeResult:
         yield Usage(self.usage)
@@ -499,6 +503,15 @@ class Dashboard(App):
         table = self.query_one(Runtimes)
         table.show(s, self.rates, self.samples)
         self.show_selected()
+        self.report_unsaved()
+
+    def report_unsaved(self) -> None:
+        """Once each time saving starts to fail: the dashboard keeps working from memory."""
+        unsaved = self.usage.unsaved or self.rates.unsaved
+        if unsaved and not self.unsaved_reported:
+            message = f"Can't save to {unsaved.filename or 'the cache'}: {unsaved.strerror or unsaved}. Usage history and learned rates won't outlast this run."
+            self.notify(message, severity="warning", timeout=POLL_SECONDS, markup=False)
+        self.unsaved_reported = unsaved is not None
 
     def show_selected(self) -> None:
         """Point the panel at the runtime under the table's cursor, the selection's only home."""

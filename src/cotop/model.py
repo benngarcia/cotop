@@ -2,12 +2,15 @@
 
 Every value here is parsed from a raw Colab response, so the parsing is the
 single place that knows the wire format (XSSI prefix, camelCase, fractions).
+A value of the wrong type raises there, never later on the screen; the types
+follow Colab's own client, colab-vscode (src/colab/client/v1/api.ts).
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 from collections import deque
 from dataclasses import dataclass, field
@@ -17,29 +20,88 @@ from pathlib import Path
 XSSI_PREFIX = ")]}'\n"
 SHAPES = {0: "STANDARD", 1: "HIGH_RAM"}
 VARIANTS = {0: "DEFAULT", 1: "GPU", 2: "TPU"}
+LONGEST_RUNWAY = timedelta(days=365 * 100)  # a balance lasting longer is not a reading of a real account
 
 
 def parse_json(body: str):
-    return json.loads(body.removeprefix(XSSI_PREFIX))
+    """NaN and Infinity are not JSON, though Python's json reads them; here they raise."""
+    return json.loads(body.removeprefix(XSSI_PREFIX), parse_constant=_not_json)
+
+
+def _not_json(constant: str):
+    raise ValueError(f"{constant} is not a JSON number")
 
 
 def parse_time(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    """A time with a zone; one without can't be compared with now."""
+    at = datetime.fromisoformat(value.replace("Z", "+00:00")) if isinstance(value, str) else None
+    if at is None or at.tzinfo is None:
+        raise ValueError(f"expected a time with a zone, got {value!r:.40}")
+    return at
 
 
-def write_atomic(path: Path, text: str) -> None:
-    """Replace path in one step, so a reader never sees half a file, even with two cotops running."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete=False) as f:
-        f.write(text)
-    os.replace(f.name, path)
+def is_number(value) -> bool:
+    """A number arithmetic works on: json reads true as a bool, which Python counts as an int,
+    1e999 as infinity, and big integers exactly."""
+    match value:
+        case bool():
+            return False
+        case int() | float():
+            return abs(value) <= sys.float_info.max
+    return False
+
+
+def number(value) -> float:
+    if not is_number(value):
+        raise ValueError(f"expected a number, got {value!r:.40}")
+    return value
+
+
+def whole(value) -> int:
+    """A count or a size in bytes: Colab's int64s, sent as JSON numbers."""
+    match value:
+        case bool():
+            pass
+        case int() if 0 <= value < 2**63:
+            return value
+    raise ValueError(f"expected a whole number, got {value!r:.40}")
+
+
+def string(value) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"expected a string, got {value!r:.40}")
+    return value
+
+
+def strings(value) -> tuple[str, ...]:
+    match value:
+        case [*items] if all(isinstance(i, str) for i in items):
+            return tuple(items)
+    raise ValueError(f"expected a list of strings, got {value!r:.40}")
+
+
+def write_atomic(path: Path, text: str) -> OSError | None:
+    """Replace path in one step, so a reader never sees half a file, even with two cotops running.
+
+    A failed write (a full disk, an unwritable cache) is returned, not raised: cotop
+    keeps working from memory, and the dashboard says once that it can't save.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.NamedTemporaryFile("w", dir=path.parent, prefix=path.name, suffix=".tmp", delete_on_close=False) as f:
+            f.write(text)
+            f.close()
+            os.replace(f.name, path)  # the temp file is gone, so leaving the block deletes nothing; on failure it deletes it
+    except OSError as e:
+        return e
+    return None
 
 
 def read_cache(path: Path):
-    """A cache file's JSON, or None if it is missing or damaged; cotop rebuilds what it loses."""
+    """A cache file's JSON, or None if it is missing, unreadable or damaged; cotop rebuilds what it loses."""
     try:
         return json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
+    except (OSError, ValueError):
         return None
 
 
@@ -54,13 +116,17 @@ class Account:
 
     @classmethod
     def parse(cls, email: str, ccu: dict) -> Account:
+        """Numbers stay numbers: colab-vscode reads these as z.number(), so a string is an error, not a value."""
+        balance, rate = number(ccu["currentBalance"]), number(ccu["consumptionRateHourly"])
+        if rate < 0 or (rate and not abs(balance / rate) <= LONGEST_RUNWAY / timedelta(hours=1)):
+            raise ValueError(f"{balance} compute units at {rate} an hour is not an account")
         return cls(
-            email=email,
-            balance=ccu["currentBalance"],
-            rate_hourly=ccu["consumptionRateHourly"],
-            assignments_count=ccu["assignmentsCount"],
-            eligible_gpus=tuple(ccu.get("eligibleGpus", ())),
-            eligible_tpus=tuple(ccu.get("eligibleTpus", ())),
+            email=string(email),
+            balance=balance,
+            rate_hourly=rate,
+            assignments_count=whole(ccu["assignmentsCount"]),
+            eligible_gpus=strings(ccu.get("eligibleGpus", [])),
+            eligible_tpus=strings(ccu.get("eligibleTpus", [])),
         )
 
     @property
@@ -84,6 +150,22 @@ class Gpu:
     memory_used: int
     memory_total: int
 
+    @classmethod
+    def parse(cls, gpu: dict) -> Gpu:
+        return cls(
+            string(gpu.get("name", "GPU")),
+            utilization(gpu.get("gpuUtilization")),
+            whole(gpu.get("memoryUsedBytes", 0)),
+            whole(gpu.get("memoryTotalBytes", 0)),
+        )
+
+
+def utilization(value) -> float | None:
+    """A fraction from 0 to 1, as colab-vscode documents gpuUtilization; 85 is not 85%, it is an error."""
+    if value is None or (is_number(value) and 0 <= value <= 1):
+        return value
+    raise ValueError(f"expected a utilization from 0 to 1, got {value!r:.40}")
+
 
 @dataclass(frozen=True)
 class Resources:
@@ -99,19 +181,17 @@ class Resources:
     @classmethod
     def parse(cls, at: datetime, resources: dict) -> Resources:
         """Sizes are optional and default to 0, as in Colab's own client (colab-vscode);
-        a missing utilization stays None, so it draws as a gap rather than an idle GPU."""
+        a missing utilization stays None, so it draws as a gap rather than an idle GPU.
+        A size that is there must be a whole number: a null or a string fails the reading."""
         memory = resources.get("memory", {})
         disks = [d.get("filesystem", {}) for d in resources.get("disks", [])]
         return cls(
             at=at,
-            memory_total=memory.get("totalBytes", 0),
-            memory_free=memory.get("freeBytes", 0),
-            disk_total=sum(d.get("totalBytes", 0) for d in disks),
-            disk_used=sum(d.get("usedBytes", 0) for d in disks),
-            gpus=tuple(
-                Gpu(g.get("name", "GPU"), g.get("gpuUtilization"), g.get("memoryUsedBytes", 0), g.get("memoryTotalBytes", 0))
-                for g in resources.get("gpus", [])
-            ),
+            memory_total=whole(memory.get("totalBytes", 0)),
+            memory_free=whole(memory.get("freeBytes", 0)),
+            disk_total=sum(whole(d.get("totalBytes", 0)) for d in disks),
+            disk_used=sum(whole(d.get("usedBytes", 0)) for d in disks),
+            gpus=tuple(Gpu.parse(g) for g in resources.get("gpus", [])),
         )
 
     @property
@@ -177,7 +257,7 @@ class Status:
         return cls(
             started=parse_time(status["started"]),
             kernels=tuple(
-                Kernel(k["execution_state"], parse_time(k["last_activity"]), k["connections"])
+                Kernel(string(k["execution_state"]), parse_time(k["last_activity"]), whole(k["connections"]))
                 for k in kernels
             ),
         )
@@ -210,7 +290,7 @@ class Runtime:
     accelerator: str
     shape: str
     variant: str
-    url: str
+    url: str | None  # None: Colab has not given it a runtime proxy yet
     token: str = field(default="", repr=False)  # runtime proxy token: used for requests, never shown
     name: str | None = None  # the colab CLI's local name, if it made this one
     running: str | None = None
@@ -284,8 +364,12 @@ class RateBook:
 
     def __init__(self, path: Path):
         self.path = path
-        rates = read_cache(path)
-        self.rates: dict[str, float] = rates if isinstance(rates, dict) else {}
+        self.unsaved: OSError | None = None  # why the last change could not be written
+        match read_cache(path):
+            case dict(rates) if all(is_number(r) for r in rates.values()):
+                self.rates: dict[str, float] = rates
+            case _:
+                self.rates = {}
 
     def observe(self, account: Account, runtimes: list[Runtime]) -> None:
         kinds = {r.kind for r in runtimes}
@@ -297,7 +381,7 @@ class RateBook:
         kind = kinds.pop()
         if self.rates.get(kind) != rate:
             self.rates[kind] = rate
-            write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
+            self.unsaved = write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
     def rate(self, runtime: Runtime, runtimes: list[Runtime], account: Account) -> Rate:
         if len(runtimes) == 1:
@@ -320,21 +404,19 @@ class UsageLog:
 
     def __init__(self, path: Path):
         self.path = path
+        self.unsaved: OSError | None = None  # why the last sample could not be written
         self.samples: list[tuple[datetime, float, float]] = []
         if path.exists():
-            for line in path.read_text().splitlines():
-                try:
-                    ts, balance, rate = json.loads(line)
-                    self.samples.append((parse_time(ts), balance, rate))
-                except ValueError:  # a damaged line from an older cotop: skip it
-                    continue
+            self.samples = [s for line in path.read_text().splitlines() if (s := _sample(line))]
 
     def record(self, now: datetime, balance: float, rate: float) -> None:
+        """Only numbers go in: one string here would break every burn for the next hour, even after a restart."""
+        balance, rate = number(balance), number(rate)
         if self.samples and self.samples[-1][1:] == (balance, rate):
             return
         self.samples.append((now, balance, rate))
         self.samples = [s for s in self.samples if now - s[0] <= self.KEEP]
-        write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
+        self.unsaved = write_atomic(self.path, "".join(json.dumps([t.isoformat(), b, r]) + "\n" for t, b, r in self.samples))
 
     def burn(self, now: datetime, window: timedelta = timedelta(hours=1)) -> float | None:
         """Compute units per hour actually charged within the window."""
@@ -361,6 +443,17 @@ class UsageLog:
             out.append(rate)
         return out
 
+
+
+def _sample(line: str) -> tuple[datetime, float, float] | None:
+    """One usage line; a damaged one, or one an older cotop wrote with a string in it, is skipped."""
+    try:
+        match json.loads(line):
+            case [ts, balance, rate] if is_number(balance) and is_number(rate):
+                return parse_time(ts), balance, rate
+    except ValueError:
+        pass
+    return None
 
 @dataclass(frozen=True)
 class PastSession:
@@ -494,28 +587,49 @@ def runtimes_from(
     status: dict[str, Status | Exception],
     assigned_at: dict[str, datetime] | None = None,
 ) -> list[Runtime]:
-    """Join the server's assignments with the CLI's names, history and kernel status."""
+    """Join the server's assignments with the CLI's names, history and kernel status.
+
+    An assignment with a field of the wrong type fails the whole poll, loudly:
+    leaving it out would hide a VM that is billing.
+    """
     by_endpoint = {s["endpoint"]: s for s in local.values()}
     runtimes = []
     for a in assignments:
-        mine = by_endpoint.get(a["endpoint"], {})
-        t = status.get(a["endpoint"])
+        endpoint = string(a["endpoint"])
+        mine = by_endpoint.get(endpoint, {})
+        t = status.get(endpoint)
+        url, token = runtime_proxy(a) or (None, "")
+        shape, variant = whole(a.get("machineShape", 0)), whole(a.get("variant", 0))
         runtimes.append(
             Runtime(
-                endpoint=a["endpoint"],
-                accelerator=a["accelerator"],
-                shape=SHAPES.get(a.get("machineShape", 0), str(a.get("machineShape"))),
-                variant=VARIANTS.get(a.get("variant", 0), str(a.get("variant"))),
-                url=a["runtimeProxyInfo"]["url"],
-                token=a["runtimeProxyInfo"]["token"],
+                endpoint=endpoint,
+                accelerator=string(a["accelerator"]),
+                shape=SHAPES.get(shape, str(shape)),
+                variant=VARIANTS.get(variant, str(variant)),
+                url=url,
+                token=token,
                 name=mine.get("name"),
                 running=mine.get("running"),
-                assigned_at=(assigned_at or {}).get(a["endpoint"]),
+                assigned_at=(assigned_at or {}).get(endpoint),
                 status=t if isinstance(t, Status) else None,
                 error=f"{type(t).__name__}: {t}" if isinstance(t, Exception) else None,
             )
         )
     return runtimes
+
+
+def runtime_proxy(assignment: dict) -> tuple[str, str] | None:
+    """The URL and token of a runtime's proxy; None while Colab has not given it one.
+
+    colab-vscode's Runtime has connectionInfo as optional, so an assignment can
+    come without it; its error never shows the token.
+    """
+    match assignment.get("runtimeProxyInfo"):
+        case None:
+            return None
+        case {"url": str(url), "token": str(token)}:
+            return url, token
+    raise ValueError("runtimeProxyInfo without a url and token")
 
 
 def utc_now() -> datetime:
