@@ -9,6 +9,7 @@ through the colab CLI itself, so its session file and history stay its own.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import threading
 import time
@@ -123,11 +124,13 @@ def _cli(command: Command, name: str) -> str:
     """Run a colab CLI command with no stdin, so a prompt fails instead of waiting unseen behind the dashboard.
 
     The CLI says what happened on stdout; stderr holds warnings, or the traceback when it crashes.
+    A failure shows the last line of each, so a crash after "Stopping session..." says why.
     """
-    done = subprocess.run(colab_argv(command, name), stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180)
+    plain = {**os.environ, "TYPER_STANDARD_TRACEBACK": "1"}  # a crash's last line is its exception, not a box border
+    done = subprocess.run(colab_argv(command, name), stdin=subprocess.DEVNULL, env=plain, capture_output=True, text=True, timeout=180)
     out, err = done.stdout.strip().splitlines(), done.stderr.strip().splitlines()
     if done.returncode != 0 or (out and out[-1].endswith("not found.")):  # `colab stop` exits 0 for a name it doesn't know
-        raise RuntimeError((out or err or [f"colab {command} exited {done.returncode}"])[-1])
+        raise RuntimeError(" / ".join(lines[-1] for lines in (out, err) if lines) or f"colab {command} exited {done.returncode}")
     return out[-1] if out else f"colab {command} done"
 
 
