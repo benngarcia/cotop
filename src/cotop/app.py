@@ -599,8 +599,11 @@ class Dashboard(App):
         else:
             self.call_from_thread(self.notify, f"{label}: {result}")
         finally:
-            self.call_from_thread(self.acting.discard, runtime.endpoint)
-            self.call_from_thread(self.action_refresh)
+            self.call_from_thread(self.returned, runtime)
+
+    def returned(self, runtime: Runtime) -> None:
+        self.acting.discard(runtime.endpoint)
+        self.action_refresh()
 
 
 def main() -> None:
