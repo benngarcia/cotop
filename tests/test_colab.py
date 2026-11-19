@@ -133,3 +133,58 @@ def test_the_cli_library_never_logs_below_warning_or_to_its_log_file(monkeypatch
         assert logger.getEffectiveLevel() == logging.WARNING
         handlers = logger.handlers + logging.getLogger().handlers
         assert not [h for h in handlers if str(getattr(h, "baseFilename", "")).endswith("colab.log")]
+
+
+FAKE_COLAB = """
+import sys
+mode = sys.argv[1]
+if mode == "warn":
+    print("[colab] Stopping session 'train'...")
+    print("[colab] Session terminated.")
+    print("Warning: Could not read the OAuth token from the OS keyring (timed out).", file=sys.stderr)
+elif mode == "notfound":
+    print("[colab] Session 'train' not found.")
+elif mode == "prompt":  # the CLI's sign-in when its token can't be refreshed
+    print("read: " + input("Enter the authorization code: "))
+elif mode == "crash":
+    print("[colab] Stopping session 'train'...", flush=True)
+    raise RuntimeError("403 Forbidden for url: .../tun/m/unassign/gpu-g4")
+"""
+
+
+def test_a_colab_command_reports_what_it_said_on_stdout_and_reads_no_keys(tmp_path, monkeypatch):
+    """Its stderr warning is not the result, "not found" is not a success, and a prompt can't read cotop's terminal."""
+    import os
+    import sys
+
+    import pytest
+
+    (tmp_path / "colab").write_text(FAKE_COLAB)
+    monkeypatch.setattr(colab, "colab_argv", lambda mode, name: [sys.executable, str(tmp_path / "colab"), mode])
+    assert colab._cli("warn", "train") == "[colab] Session terminated."
+    with pytest.raises(RuntimeError, match="Session 'train' not found"):
+        colab._cli("notfound", "train")
+    with pytest.raises(RuntimeError, match="Stopping session 'train'... / RuntimeError: 403 Forbidden"):
+        colab._cli("crash", "train")
+    typed, keyboard = os.pipe()  # cotop's stdin, holding keys meant for the dashboard
+    os.write(keyboard, b"s\n")
+    os.close(keyboard)
+    terminal = os.dup(0)
+    os.dup2(typed, 0)
+    try:
+        with pytest.raises(RuntimeError, match="Enter the authorization code: / EOFError"):
+            colab._cli("prompt", "train")
+    finally:
+        os.dup2(terminal, 0)
+        os.close(terminal)
+        os.close(typed)
+
+
+def test_the_demo_runs_without_the_cli_library(tmp_path):
+    """--demo needs no google-colab-cli internals, which may change under cotop."""
+    import subprocess
+    import sys
+
+    script = "import sys; sys.modules['colab_cli'] = None; from cotop.app import demo_dashboard; demo_dashboard(__import__('pathlib').Path(sys.argv[1]))"
+    done = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, text=True)
+    assert done.returncode == 0, done.stderr

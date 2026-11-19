@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import subprocess
 import sys
+import termios
+import threading
+from collections.abc import Callable
+from contextlib import suppress
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
+from time import monotonic
+from typing import TYPE_CHECKING
 
 from rich.text import Text
 from textual import events, work
@@ -17,9 +24,8 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen, Screen
 from textual.theme import Theme
 from textual.widgets import Button, DataTable, Footer, Label, Static
-from textual.worker import Worker, WorkerState
+from textual.worker import Worker, WorkerState, get_current_worker
 
-from cotop.colab import Colab
 from cotop.model import (
     Account,
     KernelState,
@@ -38,8 +44,13 @@ from cotop.model import (
 )
 from cotop.widgets import AMBER, DIM, ORANGE, PRESSURE, RED, WORK, Graph, TimeAxis, meter, sparkline
 
+if TYPE_CHECKING:
+    from cotop.colab import Colab  # imported on the live path only: --demo must run without the CLI's internals
+
 CACHE = Path("~/.cache/cotop").expanduser()
 POLL_SECONDS = 15
+POLL_DEADLINE = 30  # a refresh still reading after this is abandoned and reported
+STALE = timedelta(seconds=POLL_SECONDS + POLL_DEADLINE)  # by now a refresh should have landed
 SAMPLE_SECONDS = 2
 LOW_RUNWAY = timedelta(hours=24)
 ENDINGS = {"user_requested": "stopped", "pruned": "gone"}  # the CLI's reason codes, as people say them
@@ -74,11 +85,15 @@ class Usage(Vertical):
     def __init__(self, log: UsageLog):
         super().__init__()
         self.usage_log = log
+        self.snapshot: Snapshot | None = None
 
     def compose(self) -> ComposeResult:
         with Horizontal():
             yield Static(id="usage-text")
             yield Graph(WORK, source=self.rate_values, id="usage-graph")
+
+    def on_mount(self) -> None:
+        self.set_interval(1, self.show_age)
 
     def rate_values(self, n: int) -> list[float | None]:
         series = self.usage_log.rate_series(utc_now(), n)
@@ -86,10 +101,20 @@ class Usage(Vertical):
         return [None if r is None else r / top for r in series]
 
     def show(self, s: Snapshot, log: UsageLog) -> None:
-        self.border_title = s.account.email
+        self.snapshot = s
+        self.show_age()
         self.query_one("#usage-text", Static).update(account_text(s, log.burn(s.taken_at)))
         self.query_one("#usage-graph", Graph).refresh()
         self.border_subtitle = "rate over 24h"
+
+    def show_age(self) -> None:
+        """Whose account this is and how old its figures are; red once a refresh is overdue."""
+        if self.snapshot is None:
+            return
+        age = utc_now() - self.snapshot.taken_at
+        ago = f"{age.seconds}s" if age < timedelta(minutes=1) else fmt_duration(age)
+        note = (f"  stale, updated {ago} ago", f"bold {RED}") if age > STALE else (f"  updated {ago} ago", DIM)
+        self.border_title = Text.assemble(self.snapshot.account.email, note)
 
 
 def account_text(s: Snapshot, burn: float | None) -> Text:
@@ -433,6 +458,7 @@ class Dashboard(App):
         self.sampling: Worker | None = None
         self.unsaved_reported = False
         self.acting: set[str] = set()  # endpoints with a stop or kernel restart not yet returned
+        self.input_from = 0.0  # Textual's clock (monotonic): input made before this is dropped unread
 
     def compose(self) -> ComposeResult:
         yield Usage(self.usage)
@@ -465,20 +491,27 @@ class Dashboard(App):
         if self.snapshot and not (self.sampling and self.sampling.is_running):
             self.sampling = self.sample(self.snapshot.runtimes)
 
-    @work(thread=True)
-    def poll(self) -> None:
+    @work
+    async def poll(self) -> None:
         try:
-            self.email = self.email or self.colab.email()
-            account = Account.parse(self.email, self.colab.ccu_info())
-            assignments = self.colab.assignments()
-            history = self.colab.history()
-            status = self.colab.status(assignments)
-            runtimes = runtimes_from(assignments, self.colab.sessions(), status, history.assigned_at())
-            snapshot = Snapshot(utc_now(), account, runtimes, history)
+            snapshot = await asyncio.wait_for(self.read(), POLL_DEADLINE)
+        except TimeoutError:
+            self.show_error(TimeoutError(f"still reading after {POLL_DEADLINE} s"))
         except Exception as e:
-            self.call_from_thread(self.show_error, e)
-            return
-        self.call_from_thread(self.show, snapshot)
+            self.show_error(e)
+        else:
+            self.show(snapshot)
+
+    async def read(self) -> Snapshot:
+        """One refresh. Each read waits on its own thread, so a cancelled poll starts no further read."""
+        colab = self.colab
+        self.email = self.email or await detached(colab.email)
+        account = Account.parse(self.email, await detached(colab.ccu_info))
+        assignments = await detached(colab.assignments)
+        history = await detached(colab.history)
+        status = await detached(partial(colab.status, assignments))
+        runtimes = runtimes_from(assignments, await detached(colab.sessions), status, history.assigned_at())
+        return Snapshot(utc_now(), account, runtimes, history)
 
     @work(thread=True)
     def sample(self, runtimes: list[Runtime]) -> None:
@@ -533,8 +566,8 @@ class Dashboard(App):
             table.show(self.snapshot, self.rates, self.samples)
 
     def show_error(self, e: Exception) -> None:
-        age = f" Showing data from {fmt_duration(utc_now() - self.snapshot.taken_at)} ago." if self.snapshot else ""
-        self.notify(f"Refresh failed: {type(e).__name__}: {e}.{age}", severity="error", timeout=POLL_SECONDS, markup=False)
+        """The account header already says how old the data on screen is."""
+        self.notify(f"Refresh failed: {type(e).__name__}: {e}.", severity="error", timeout=POLL_SECONDS, markup=False)
 
     # Selection and actions.
 
@@ -586,7 +619,17 @@ class Dashboard(App):
                 code = subprocess.run(argv).returncode
                 if code != 0:  # keep colab's error on screen; resuming would paint over it
                     input(f"\ncolab ssh exited {code}. Press Enter to return to cotop.")
+                with suppress(termios.error):  # what the shell left unread; Textual flushes only on suspend
+                    termios.tcflush(sys.__stdin__, termios.TCIFLUSH)
+        # Keys typed while the check or the shell held the loop were read before any prompt they
+        # would answer was drawn: `s y` typed then would stop the runtime unseen.
+        self.input_from = monotonic()
         self.action_refresh()
+
+    async def on_event(self, event: events.Event) -> None:
+        if isinstance(event, events.InputEvent) and event.time < self.input_from:
+            return
+        await super().on_event(event)
 
     def check_action(self, action: str, parameters: tuple) -> bool | None:
         """Runtime keys work only on the dashboard, where you can see the runtime they act on."""
@@ -627,6 +670,33 @@ class Dashboard(App):
         self.action_refresh()
 
 
+async def detached[T](read: Callable[[], T]) -> T:
+    """read() on a daemon thread, awaited in a worker. Nothing joins the thread: quitting, or a poll that gave up,
+    never waits for a stuck read.
+
+    A read that returns once the app has begun quitting raises CancelledError instead: Textual takes the screens
+    down before it cancels workers, so whatever the caller would show has no widget left to show it in.
+    """
+    app = get_current_worker().node.app
+    loop = asyncio.get_running_loop()
+    done = loop.create_future()
+
+    def run() -> None:
+        try:
+            outcome = partial(done.set_result, read())
+        except Exception as e:
+            outcome = partial(done.set_exception, e)
+        with suppress(RuntimeError):  # the loop has closed: cotop quit while this read ran
+            loop.call_soon_threadsafe(lambda: done.cancelled() or outcome())
+
+    threading.Thread(target=run, daemon=True).start()
+    try:
+        return await done
+    finally:
+        if not app.is_running:
+            raise asyncio.CancelledError
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-i", "--identity", help="SSH key for x (passed to colab ssh -i)")
@@ -635,6 +705,8 @@ def main() -> None:
     if args.demo:
         run_demo()
         return
+    from cotop.colab import Colab
+
     try:
         colab = Colab.sign_in(ssh_identity=args.identity)  # before the UI: sign-in may prompt in the terminal
     except Exception as e:
