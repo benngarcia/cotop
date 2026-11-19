@@ -183,12 +183,19 @@ def test_burn_ignores_top_ups_and_short_windows(tmp_path):
     assert log.burn(NOW) is None
 
 
-def test_rate_series_steps_through_the_day(tmp_path):
+def watch(log, start, end, balance, rate):
+    """Record as a running cotop does: once a poll."""
+    while start < end:
+        log.record(start, balance, rate)
+        start += timedelta(seconds=15)
+
+
+def test_rate_series_draws_only_the_hours_cotop_watched(tmp_path):
     log = UsageLog(tmp_path / "u.jsonl")
-    log.record(NOW - timedelta(hours=15), 100.0, 1.76)
-    log.record(NOW - timedelta(hours=5), 90.0, 11.77)
-    # four 6-hour columns, each the rate at its end: -18h (nothing logged yet), -12h, -6h, now
-    assert log.rate_series(NOW, 4) == [None, 1.76, 1.76, 11.77]
+    watch(log, NOW - timedelta(hours=15), NOW - timedelta(hours=10), 100.0, 1.76)  # then cotop was closed
+    watch(log, NOW - timedelta(hours=5), NOW, 90.0, 11.77)
+    # four 6-hour columns, each the rate at its end: -18h (nothing logged yet), -12h, -6h (closed), now
+    assert log.rate_series(NOW, 4) == [None, 1.76, None, 11.77]
 
 
 SECRET_HISTORY = (  # a session's CLI history whose code, outputs and stdin reply are canaries

@@ -314,9 +314,13 @@ class UsageLog:
 
     Colab settles the balance in steps a few minutes apart, so burn is measured
     between the first and last step inside the window, not between polls.
+    An unchanged sample is written again every REPEAT, so the log also says
+    when cotop was watching: a longer silence is time nobody saw.
     """
 
     KEEP = timedelta(days=7)
+    REPEAT = timedelta(minutes=5)
+    WATCHED = 2 * REPEAT  # how long a sample vouches for the rate: its repeat, with room for polls failing a few minutes
 
     def __init__(self, path: Path):
         self.path = path
@@ -330,7 +334,7 @@ class UsageLog:
                     continue
 
     def record(self, now: datetime, balance: float, rate: float) -> None:
-        if self.samples and self.samples[-1][1:] == (balance, rate):
+        if self.samples and self.samples[-1][1:] == (balance, rate) and now - self.samples[-1][0] < self.REPEAT:
             return
         self.samples.append((now, balance, rate))
         self.samples = [s for s in self.samples if now - s[0] <= self.KEEP]
@@ -351,14 +355,14 @@ class UsageLog:
         return (b0 - b1) / hours
 
     def rate_series(self, now: datetime, columns: int, window: timedelta = timedelta(hours=24)) -> list[float | None]:
-        """The hourly rate across the window in equal steps, oldest first; None before the first sample."""
-        out, i, rate = [], 0, None
+        """The hourly rate across the window in equal steps, oldest first; None where cotop was not watching."""
+        out, i, last = [], 0, None
         for c in range(columns):
             at = now - window + window * (c + 1) / columns
             while i < len(self.samples) and self.samples[i][0] <= at:
-                rate = self.samples[i][2]
+                last = self.samples[i]
                 i += 1
-            out.append(rate)
+            out.append(last[2] if last and at - last[0] <= self.WATCHED else None)
         return out
 
 
