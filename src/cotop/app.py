@@ -28,12 +28,15 @@ from textual.worker import Worker, WorkerState, get_current_worker
 
 from cotop.model import (
     Account,
+    KernelState,
     Rate,
     RateBook,
     Resources,
     Runtime,
     Samples,
     Snapshot,
+    Status,
+    Unreachable,
     UsageLog,
     fmt_duration,
     runtimes_from,
@@ -169,15 +172,16 @@ class RuntimePanel(Vertical):
     def show(self, r: Runtime, s: Snapshot, rates: RateBook) -> None:
         now = s.taken_at
         latest = self.samples.latest(r.endpoint, utc_now())
-        self.border_title = f"{r.label}  {r.hardware}{' high-RAM' if r.shape == 'HIGH_RAM' else ''}"
-        self.border_subtitle = state_text(r, now, latest).plain + (f"  {r.running}" if r.running else "")
+        # Text, not markup: a name, a command or a kernel state can hold "[/]"
+        self.border_title = Text(f"{r.label}  {r.hardware}{' high-RAM' if r.shape == 'HIGH_RAM' else ''}")
+        self.border_subtitle = Text(state_text(r, now, latest).plain + (f"  {r.running}" if r.running else ""))
         self.show_readings(r)
 
         rate = rates.rate(r, s)
         billed = r.billed_for(now)
         lines = []
-        if r.error:
-            lines.append(Text(f"unreachable\n{r.error}", style=RED))
+        if isinstance(r.health, Unreachable):
+            lines.append(Text(f"unreachable\n{r.health.error}", style=RED))
         for concern in r.concerns(now, latest):
             billing = ", still billing" if concern.startswith("idle") else ""
             lines.append(Text(concern + billing, style=ORANGE))
@@ -186,8 +190,8 @@ class RuntimePanel(Vertical):
             lines.append(Text.assemble(("up ", DIM), time_text(billed), (f"  {since}", DIM)))
             if rate.hourly is not None:
                 lines.append(Text.assemble(("spent ", DIM), spend_text(rate, billed), (f"  at {rate_text(rate)}/hr", DIM)))
-        if r.status:
-            lines.append(Text.assemble(("clients ", DIM), str(r.status.clients)))
+        if isinstance(r.health, Status):
+            lines.append(Text.assemble(("clients ", DIM), str(r.health.clients)))
         self.query_one(".facts", Static).update(Text("\n").join(lines))
         events = s.history.recent(r.name, limit=12) if r.name else []
         activity = Text("\n").join(Text.assemble((clock(e.at) + "  ", DIM), e.summary) for e in events)
@@ -253,17 +257,21 @@ def time_text(billed: tuple[timedelta, bool]) -> str:
 
 
 def state_text(r: Runtime, now: datetime, latest: Resources | None) -> Text:
-    if r.error:
+    if isinstance(r.health, Unreachable):
         return Text("unreachable", style=RED)
     concerns = r.concerns(now, latest)
     if concerns:
         return Text(concerns[0], style=ORANGE)
-    if r.status is None:
-        return Text("starting", style=DIM)
-    if r.status.busy:
-        return Text("busy", style=AMBER)
-    idle = r.idle_for(now)
-    return Text(f"idle {fmt_duration(idle)}" if idle else "idle", style=DIM)
+    match r.health.state:
+        case KernelState.IDLE:
+            idle = r.idle_for(now)
+            return Text(f"idle {fmt_duration(idle)}" if idle else "idle", style=DIM)
+        case KernelState.DEAD:
+            return Text("kernel dead", style=ORANGE)
+        case KernelState() as working:  # busy or starting
+            return Text(working.value, style=AMBER)
+        case other:  # a state Jupyter Server doesn't set, as it came
+            return Text(other)
 
 
 class Runtimes(DataTable):
@@ -396,7 +404,7 @@ class HistoryScreen(Screen):
         live = {r.endpoint for r in s.runtimes}
         for p in s.history.past_sessions():
             run = p.lasted(s.taken_at, live)
-            ended = ENDINGS.get(p.reason, p.reason) if p.reason else ("running" if p.endpoint in live else "unknown")
+            ended = ENDINGS.get(p.ending.reason, p.ending.reason or "ended") if p.ending else "running" if p.endpoint in live else "unknown"
             table.add_row(
                 p.name,
                 p.kind.replace("/STANDARD", "").replace("/HIGH_RAM", " hi-RAM"),
@@ -615,14 +623,14 @@ class Dashboard(App):
     def action_stop(self) -> None:
         if not (r := self.target()):
             return
-        busy = f" It is busy running {r.running}." if r.status and r.status.busy and r.running else ""
+        busy = f" It is busy running {r.running}." if r.busy and r.running else ""
         question = f"Stop {r.name or r.endpoint} ({r.hardware})? Its VM and files will be deleted.{busy}"
         self.push_screen(Confirm(question, "Stop"), lambda yes: yes and self.act(self.colab.stop, r))
 
     def action_restart_kernel(self) -> None:
         if not (r := self.target(named_to="restart the kernel of")):
             return
-        busy = " Its running code is interrupted." if r.status and r.status.busy else ""
+        busy = " Its running code is interrupted." if r.busy else ""
         question = f"Restart {r.name}'s kernel? Everything in memory is lost; files stay.{busy}"
         self.push_screen(Confirm(question, "Restart"), lambda yes: yes and self.act(self.colab.restart_kernel, r))
 

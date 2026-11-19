@@ -11,8 +11,7 @@ import pytest
 import cotop
 from cotop import colab, colab_cli_calls
 from cotop.colab_cli_calls import Google
-from cotop.model import runtimes_from
-from tests.test_model import G4, LOCAL
+from tests.test_model import G4, LOCAL, running
 
 SRC = Path(cotop.__file__).parent
 HANDOFF = colab_cli_calls.__name__
@@ -67,7 +66,7 @@ def ran(monkeypatch):
 
 
 def runtime(name="NAME"):
-    [r] = runtimes_from([G4], LOCAL, {})
+    [r] = running([G4], LOCAL)
     return replace(r, name=name)
 
 

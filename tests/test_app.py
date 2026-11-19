@@ -21,9 +21,10 @@ from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, account_
 from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
+from textual.content import Content
 
 from cotop.widgets import ORANGE, RED, sparkline
-from cotop.model import Account, History, PastSession, RateBook, Resources, Snapshot, Status, parse_json, runtimes_from, utc_now
+from cotop.model import Account, History, KernelState, PastSession, RateBook, Resources, Snapshot, Status, Unreachable, parse_json, runtimes_from, utc_now
 from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 
@@ -124,6 +125,9 @@ async def test_mixed_untracked_unreachable_and_idle(isolated):
         await pilot.press("down")
         await settle(app, pilot)
         assert panel.border_title == "untracked  T4"
+        await pilot.press("down")
+        await settle(app, pilot)
+        assert str(panel.query_one(".facts").render()).count("proxy said 502") == 1
 
 
 async def test_failed_refresh_keeps_the_last_data(isolated):
@@ -147,6 +151,17 @@ async def test_an_error_message_is_shown_as_text_not_markup(isolated):
         await settle(app, pilot)
         await pilot.pause(0.2)
         assert any("ValueError: unexpected '[/]' in the reply." in str(n.message) for n in app._notifications)
+        assert app.is_running
+
+
+async def test_a_kernel_state_or_command_is_shown_as_text_not_markup(isolated):
+    """The panel's border shows the kernel state as the server reports it, and the CLI's command, verbatim."""
+    colab = StubColab([G4], {G4["endpoint"]: status("[/]")}, {}, rate=10.05)
+    colab.local = {"train": {**LOCAL["train"], "running": "run([b]x.py)"}}
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        assert Content.from_markup(app.query_one(RuntimePanel).border_subtitle).plain == "[/]  run([b]x.py)"
         assert app.is_running
 
 
@@ -261,6 +276,7 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
         tmp_path / "history",
         train=[created(now - timedelta(hours=1), G4["endpoint"])],
         old=[created(now - timedelta(hours=5), "gone"), pruned],
+        quiet=[created(now - timedelta(hours=3), "q"), {"timestamp": (now - timedelta(hours=2)).isoformat(), "event_type": "session_terminated"}],
     )
     colab.history = lambda: history
     app = Dashboard(colab, isolated)
@@ -269,9 +285,10 @@ async def test_the_history_screen_marks_bounds_and_costs_live_sessions(isolated,
         await pilot.press("h")
         await pilot.pause()
         table = app.screen.query_one("DataTable")
-        rows = [[str(c) for c in table.get_row_at(i)] for i in range(2)]
+        rows = [[str(c) for c in table.get_row_at(i)] for i in range(3)]
         assert [r[:2] + r[3:] for r in rows] == [  # all but Started, which is local time
             ["train", "G4", "1h00m", "≈10.0", "running"],
+            ["quiet", "G4", "1h00m", "≈10.0", "ended"],  # a terminate with no reason still ended
             ["old", "G4", "≤1h00m", "≈10.0", "gone"],  # a learned rate: no bound, though the time is one
         ]
 
@@ -560,6 +577,28 @@ async def test_the_demo_runs_and_sorts_the_most_expensive_first(tmp_path):
         await pilot.resize_terminal(80, 24)
         await settle(app, pilot)
         assert "Up" not in table.columns  # too narrow: the panel still shows uptime
+
+
+@pytest.mark.parametrize(
+    "state,shown",
+    [("idle", "idle 25m"), ("busy", "busy"), ("starting", "starting"), ("dead", "kernel dead"), ("restarting", "restarting"), ("hibernating", "hibernating")],
+)
+def test_only_an_idle_kernel_reads_as_idle(state, shown):
+    """A kernel starting again after R, or dead, is not one idling on the meter; a state Jupyter Server doesn't set shows as it came."""
+    [r] = runtimes_from([G4], LOCAL, {G4["endpoint"]: status(state, "2026-11-17T21:35:00Z")})
+    assert state_text(r, NOW, resources(0.0)).plain == shown
+
+
+def test_a_demo_stop_between_the_two_reads_is_an_unreachable_row_and_goes_in_its_history():
+    from cotop.demo import DemoColab
+
+    demo = DemoColab()
+    assignments = demo.assignments()
+    [r] = runtimes_from(assignments[:1], demo.sessions(), demo.status(assignments[:1]))
+    demo.stop(r)  # lands after the poll read the assignments
+    runtimes = runtimes_from(assignments, demo.sessions(), demo.status(assignments))
+    assert next(s for s in runtimes if s.endpoint == r.endpoint).health == Unreachable("ConnectionError: runtime proxy returned 502")
+    assert demo.history().recent(r.name)[0].summary == "terminated (user_requested)"
 
 
 async def test_compute_units_turn_red_when_they_last_under_a_day(isolated):
@@ -897,6 +936,7 @@ NAN = WIRE["/api/colab/resources"].replace('"gpuUtilization": 1.0', '"gpuUtiliza
         pytest.param(wire(WIRE, "/api/status", "started", value="2026-11-17T20:59:46"), (), "row", id="status_naive_started"),
         pytest.param(wire(WIRE, "/api/kernels", 0, "connections", value=None), (), "row", id="kernels_connections_null"),
         pytest.param(wire(WIRE, "/api/kernels", value={"message": "Forbidden"}), (), "row", id="kernels_error_dict"),
+        pytest.param(wire(WIRE, "/api/kernels", 0, "execution_state", value="hibernating"), (), "ok", id="kernels_state_unlisted"),
         pytest.param(wire(WIRE, "history", value=WIRE["history"].replace('"remote": "/content/out/model.pt"', '"remote": ["a", "b"]')), (), "ok", id="hist_remote_list"),
         pytest.param(wire(WIRE, "history", value=WIRE["history"].replace('"reason": "user_requested"', '"reason": ["x"]')), ("h",), "ok", id="hist_reason_list"),
         pytest.param(wire(WIRE, "history", value=WIRE["history"].replace(f'"endpoint": "{G4["endpoint"]}"', '"endpoint": ["x"]')), (), "ok", id="hist_endpoint_list"),
@@ -1065,7 +1105,7 @@ def test_every_value_that_parses_draws(data):
         sparkline([reading.gpu_utilization], 8)
     if health:
         assert health.started.tzinfo and all(k.last_activity.tzinfo for k in health.kernels)
-        assert all(type(k.state) is str and is_whole(k.connections) for k in health.kernels)
+        assert all(type(k.state) in (KernelState, str) and is_whole(k.connections) for k in health.kernels)
     for r in runtimes or []:
         assert all(type(v) is str for v in (r.endpoint, r.accelerator, r.shape, r.token)) and (r.url is None or type(r.url) is str)
         r.concerns(NOW, reading)

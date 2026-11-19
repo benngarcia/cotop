@@ -11,8 +11,7 @@ import urllib3
 
 from cotop import colab
 from cotop.colab import still_assigned
-from cotop.model import runtimes_from
-from tests.test_model import FIXTURES, G4, LOCAL, T4, assignment
+from tests.test_model import FIXTURES, G4, LOCAL, T4, assignment, running
 
 STATUS = {"/api/status": json.dumps({"started": "2026-11-17T20:59:46Z"}), "/api/kernels": "[]"}
 
@@ -45,12 +44,12 @@ def runtime_proxy(code=200):
 
 
 def test_a_name_counts_only_while_it_still_means_the_same_vm():
-    [r] = runtimes_from([G4], LOCAL, {})
+    [r] = running([G4], LOCAL)
     assert still_assigned(r, [G4], LOCAL)
     assert not still_assigned(r, [], LOCAL)  # VM gone: `colab ssh -s` would create a new one
     reused = {"train": {"name": "train", "endpoint": "gpu-g4-new", "running": None}}
     assert not still_assigned(r, [G4], reused)  # name now means another VM
-    [untracked] = runtimes_from([G4], {}, {})
+    [untracked] = running([G4], {})
     assert not still_assigned(untracked, [G4], {})
 
 
@@ -67,7 +66,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
     """README "Safety": reading a runtime must not keep it from going idle, and must not change it."""
     with runtime_proxy() as (a, seen):
         assert colab.Colab(None).status([a])[a["endpoint"]].started is not None
-        [r] = runtimes_from([a], {}, {})
+        [r] = running([a], {})
         assert colab.Colab(None).resources(r).gpus
     assert len(seen) == 3
     assert all(method == "GET" and path.endswith("?no_track_activity=1") for method, path in seen), seen
@@ -75,7 +74,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
 
 def test_a_failed_resources_read_is_a_gap_not_a_zero():
     with runtime_proxy(code=502) as (a, _):
-        [r] = runtimes_from([a], {}, {})
+        [r] = running([a], {})
         assert isinstance(colab.Colab(None).resources(r), requests.HTTPError)
 
 
@@ -83,7 +82,7 @@ def test_an_untracked_stop_unassigns_that_runtimes_endpoint():
     """A runtime with no CLI name is stopped through the client, by its endpoint."""
     unassigned = []
     google = type("Google", (), {"unassign": lambda self, endpoint: unassigned.append(endpoint)})()
-    [untracked] = runtimes_from([T4], {}, {})
+    [untracked] = running([T4], {})
     colab.Colab(google).stop(untracked)
     assert unassigned == [T4["endpoint"]]
 
@@ -263,7 +262,7 @@ def chunked(handler, body):
 def test_a_prompt_reply_is_a_reading_however_it_is_framed(framing):
     body = (FIXTURES / "resources_g4.txt").read_bytes()
     with proxy_replying(lambda handler: framing(handler, body)) as url:
-        [r] = runtimes_from([{**G4, "runtimeProxyInfo": {"url": url, "token": "t"}}], {}, {})
+        [r] = running([{**G4, "runtimeProxyInfo": {"url": url, "token": "t"}}], {})
         reading = colab.Colab(None).resources(r)
     assert reading.gpu_utilization == 1.0 and reading.vram == (90_000_000_000, 100_000_000_000)
 
@@ -324,5 +323,5 @@ def test_the_demo_runs_without_the_cli_library(tmp_path):
 
 
 def test_a_runtime_without_a_proxy_yet_reads_as_that_not_a_crash():
-    [r] = runtimes_from([{k: v for k, v in G4.items() if k != "runtimeProxyInfo"}], {}, {})
+    [r] = running([{k: v for k, v in G4.items() if k != "runtimeProxyInfo"}], {})
     assert str(colab.Colab(None).resources(r)) == "Colab has not given it a runtime proxy yet"
