@@ -73,8 +73,7 @@ class Colab:
         """Act on a name only while it still means this VM.
 
         The CLI resolves names, not endpoints: a name stopped and reused since
-        the last poll would point the action at another VM, and `colab ssh`
-        creates a new runtime for a name it does not know.
+        the last poll would point the action at another VM.
         """
         if not still_assigned(runtime, self.assignments(), self.sessions()):
             raise RuntimeGone(f"{runtime.name or runtime.endpoint} is no longer this runtime; refresh and retry")
