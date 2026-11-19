@@ -326,6 +326,17 @@ async def test_a_rate_is_exact_only_when_both_reads_cover_the_same_runtimes(isol
         assert "nothing running" not in header and f"{rate:.2f} an hour" in header  # a runtime is listed
 
 
+async def test_rows_add_up_to_the_account_rate_and_spend_on_a_learned_rate_is_no_bound(isolated):
+    learned(isolated, {"G4/STANDARD": 5.0, "T4/STANDARD": 1.0})  # learned when both cost less
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    colab.local = {}  # both opened in a browser: billed since VM boot at most
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        rows = [cells(app.query_one(Runtimes), i) for i in range(2)]
+        assert [(r["CU/hr"], r["Spent"][0]) for r in rows] == [("≈9.91", "≈"), ("≈1.98", "≈")]
+
+
 async def test_a_failed_reading_is_kept_as_a_gap(isolated):
     app = Dashboard(StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05), isolated)
     async with app.run_test(size=(150, 46)) as pilot:

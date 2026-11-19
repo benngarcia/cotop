@@ -381,6 +381,7 @@ class RateBook:
     def __init__(self, path: Path):
         self.path = path
         self.unsaved: OSError | None = None  # why the last change could not be written
+        self.last_read: tuple[set[str], float] | None = None  # the runtimes and total of the last snapshot
         match read_cache(path):
             case dict(rates) if all(is_number(r) for r in rates.values()):
                 self.rates: dict[str, float] = rates
@@ -388,8 +389,15 @@ class RateBook:
                 self.rates = {}
 
     def observe(self, s: Snapshot) -> None:
+        """Learn a kind's rate when it runs alone and two polls in a row agree on the runtimes and the total.
+
+        One poll is not enough: a runtime of one kind can stop and one of another start
+        between its two reads, which the count does not show.
+        """
+        read = ({r.endpoint for r in s.runtimes}, s.account.rate_hourly)
+        steady, self.last_read = read == self.last_read, read
         kinds = {r.kind for r in s.runtimes}
-        if len(kinds) != 1 or s.account.rate_hourly <= 0 or not s.consistent:
+        if not (steady and s.consistent and len(kinds) == 1 and s.account.rate_hourly > 0):
             return
         rate = round(s.account.rate_hourly / len(s.runtimes), 4)
         kind = kinds.pop()
@@ -398,11 +406,18 @@ class RateBook:
             self.unsaved = write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
     def rate(self, runtime: Runtime, s: Snapshot) -> Rate:
-        """The account's total, split if it can be; a read that straddled a start or stop never splits."""
-        if s.consistent and len(s.runtimes) == 1:
-            return Rate(s.account.rate_hourly, Basis.REPORTED)
-        if s.consistent and len({r.kind for r in s.runtimes}) == 1:
-            return Rate(s.account.rate_hourly / len(s.runtimes), Basis.SPLIT)
+        """The account's total, split if it can be; a read that straddled a start or stop never splits.
+
+        Mixed kinds split in proportion to their learned rates, so the rows add up to the
+        total Colab charges now; with a kind not yet learned, each row shows its rate as learned.
+        """
+        total, kinds = s.account.rate_hourly, [r.kind for r in s.runtimes]
+        if s.consistent and len(kinds) == 1:
+            return Rate(total, Basis.REPORTED)
+        if s.consistent and len(set(kinds)) == 1:
+            return Rate(total / len(kinds), Basis.SPLIT)
+        if s.consistent and set(kinds) <= self.rates.keys() and (known := sum(self.rates[k] for k in kinds)) > 0:
+            return Rate(self.rates[runtime.kind] * total / known, Basis.LEARNED)
         return self.learned(runtime.kind)
 
     def learned(self, kind: str) -> Rate:

@@ -124,8 +124,9 @@ def test_mixed_hardware_does_not_give_every_row_the_account_total(tmp_path):
     book = RateBook(tmp_path / "r.json")
     assert [book.rate(r, s).basis for r in s.runtimes] == [Basis.UNKNOWN, Basis.UNKNOWN]
 
-    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 10.05))
-    book.observe(snapshot(runtimes_from([T4, T4], {}, {}), 3.68))
+    for alone in (snapshot(runtimes_from([G4], LOCAL, {}), 10.05), snapshot(runtimes_from([T4, T4], {}, {}), 3.68)):
+        book.observe(alone)
+        book.observe(alone)  # the next poll agrees
     assert [book.rate(r, s).hourly for r in s.runtimes] == [10.05, 1.84]
     assert RateBook(tmp_path / "r.json").rates == {"G4/STANDARD": 10.05, "T4/STANDARD": 1.84}
 
@@ -277,9 +278,33 @@ def test_spend_is_an_upper_bound_only_when_rate_and_time_both_are():
 
 def test_rate_book_skips_reads_that_straddle_a_start_or_stop(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 11.89, count=2))
-    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 0, count=1))
+    for straddling in (snapshot(runtimes_from([G4], LOCAL, {}), 11.89, count=2), snapshot(runtimes_from([G4], LOCAL, {}), 0, count=1)):
+        book.observe(straddling)
+        book.observe(straddling)
     assert book.rates == {}
+
+
+def test_a_kind_swap_between_the_reads_teaches_nothing(tmp_path):
+    """An H100 stops and a T4 starts between the account read and the list: the count still matches."""
+    book = RateBook(tmp_path / "r.json")
+    h100, t4 = runtimes_from([assignment("gpu-h100-s-x", "H100")], {}, {}), runtimes_from([T4], {}, {})
+    for s in (snapshot(h100, 15.04), snapshot(h100, 15.04), snapshot(t4, 15.04)):
+        book.observe(s)
+    assert RateBook(tmp_path / "r.json").rates == {"H100/STANDARD": 15.04}
+    book.observe(snapshot(t4, 1.84))
+    book.observe(snapshot(t4, 1.84))  # two polls in a row agree
+    assert RateBook(tmp_path / "r.json").rates == {"H100/STANDARD": 15.04, "T4/STANDARD": 1.84}
+
+
+def test_learned_rates_are_scaled_to_add_up_to_the_account_total(tmp_path):
+    (tmp_path / "r.json").write_text('{"G4/STANDARD": 5.0, "T4/STANDARD": 1.0}')  # learned when both cost less
+    book = RateBook(tmp_path / "r.json")
+    s = snapshot(runtimes_from([G4, T4], LOCAL, {}), 12.0)
+    assert [book.rate(r, s) for r in s.runtimes] == [Rate(10.0, Basis.LEARNED), Rate(2.0, Basis.LEARNED)]
+    straddling = snapshot(s.runtimes, 12.0, count=3)  # the total covers a runtime not listed
+    assert [book.rate(r, straddling).hourly for r in s.runtimes] == [5.0, 1.0]
+    partly_known = snapshot(runtimes_from([G4, T4, CPU], LOCAL, {}), 12.0)  # the CPU's share is not known
+    assert [book.rate(r, partly_known).hourly for r in partly_known.runtimes] == [5.0, 1.0, None]
 
 
 def test_past_session_is_live_only_while_its_endpoint_is_assigned(tmp_path):
@@ -361,10 +386,12 @@ def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_pat
 
     book = RateBook(tmp_path / "cache" / "r.json")
     (tmp_path / "cache" / "r.json").mkdir()
-    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 10.05))
+    g4 = snapshot(runtimes_from([G4], LOCAL, {}), 10.05)
+    book.observe(g4)
+    book.observe(g4)
     assert isinstance(book.unsaved, OSError)
     (tmp_path / "cache" / "r.json").rmdir()
-    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 10.05))
+    book.observe(g4)
     assert book.unsaved is None and RateBook(tmp_path / "cache" / "r.json").rates == {"G4/STANDARD": 10.05}
 
 
