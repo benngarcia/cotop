@@ -55,14 +55,14 @@ def status(state="busy", last_activity="2026-11-17T21:59:00Z"):
     )
 
 
-def resources(util=1.0, at=NOW, ram_free=None, disk_used=None):
+def resources(util=1.0, ram_free=None, disk_used=None):
     body = parse_json((FIXTURES / "resources_g4.txt").read_text())
     body["gpus"][0]["gpuUtilization"] = util
     if ram_free is not None:
         body["memory"]["freeBytes"] = ram_free
     if disk_used is not None:
         body["disks"][0]["filesystem"]["usedBytes"] = disk_used
-    return Resources.parse(at, body)
+    return Resources.parse(body)
 
 
 def test_resources_payload_parses_through_xssi_prefix():
@@ -77,21 +77,34 @@ def test_resources_payload_parses_through_xssi_prefix():
 def test_a_cpu_runtime_has_no_gpu_series():
     body = parse_json((FIXTURES / "resources_g4.txt").read_text())
     body["gpus"] = []
-    r = Resources.parse(NOW, body)
+    r = Resources.parse(body)
     assert r.gpu_utilization is None and r.vram is None
 
 
 def test_samples_keep_gaps_and_forget_ended_runtimes():
     samples = Samples()
     samples.add("a", NOW - timedelta(seconds=4), resources(0.5))
-    samples.add("a", NOW - timedelta(seconds=2), None)  # a reading that failed
+    samples.add("a", NOW - timedelta(seconds=2), ConnectionError("proxy said 502"))  # a read that failed
     samples.add("b", NOW, resources(1.0))
     assert samples.series("a", lambda r: r.gpu_utilization) == [0.5, None]
-    assert samples.latest("a").gpu_utilization == 0.5
+    assert samples.latest("a", NOW).gpu_utilization == 0.5
     assert samples.time_of("a", 1) == NOW - timedelta(seconds=2)  # a gap keeps its time
     assert samples.time_of("a", 99) == NOW - timedelta(seconds=4)
     samples.keep_only({"b"})
-    assert samples.series("a", lambda r: r.gpu_utilization) == [] and samples.latest("b") is not None
+    assert samples.series("a", lambda r: r.gpu_utilization) == [] and samples.latest("b", NOW) is not None
+
+
+def test_a_reading_is_the_runtime_now_only_while_it_is_fresh():
+    samples = Samples()
+    samples.add("a", NOW, resources(0.97))
+    for s in range(2, 30, 2):
+        samples.add("a", NOW + timedelta(seconds=s), TimeoutError("no full reply"))
+    assert samples.latest("a", NOW + timedelta(seconds=10)).gpu_utilization == 0.97  # a few late reads keep it
+    assert samples.failure("a", NOW + timedelta(seconds=10)) is None
+    assert samples.latest("a", NOW + timedelta(seconds=11)) is None  # then it is history, not now
+    assert str(samples.failure("a", NOW + timedelta(seconds=11))) == "no full reply"
+    samples.add("b", NOW, ConnectionError("proxy said 502"))
+    assert samples.failure("b", NOW + timedelta(seconds=9)) is None  # too soon to say it is failing
 
 
 def test_account_reads_eligible_hardware_and_runway():
@@ -289,7 +302,7 @@ def test_idle_counts_only_since_assignment(tmp_path):
 
 def test_resources_tolerate_missing_fields():
     """Colab's own client treats every field as optional; a booting or TPU runtime may omit them."""
-    r = Resources.parse(NOW, {"gpus": [{}], "disks": [{}]})
+    r = Resources.parse({"gpus": [{}], "disks": [{}]})
     assert (r.ram, r.disk, r.vram, r.gpu_utilization) == ((0, 0), (0, 0), None, None)
     [runtime] = runtimes_from([G4], LOCAL, {G4["endpoint"]: status()})
     assert runtime.concerns(NOW, r) == []

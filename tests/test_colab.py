@@ -1,7 +1,11 @@
 import json
 import threading
+import time
 from contextlib import contextmanager
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+
+import pytest
+import requests
 
 from cotop import colab
 from cotop.colab import still_assigned
@@ -62,7 +66,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
     with runtime_proxy() as (a, seen):
         assert colab.Colab(None).status([a])[a["endpoint"]].started is not None
         [r] = runtimes_from([a], {}, {})
-        assert colab.Colab(None).resources([r])[r.endpoint] is not None
+        assert colab.Colab(None).resources(r).gpus
     assert len(seen) == 3
     assert all(method == "GET" and path.endswith("?no_track_activity=1") for method, path in seen), seen
 
@@ -70,7 +74,7 @@ def test_every_proxy_read_is_a_get_that_asks_not_to_count_as_activity():
 def test_a_failed_resources_read_is_a_gap_not_a_zero():
     with runtime_proxy(code=502) as (a, _):
         [r] = runtimes_from([a], {}, {})
-        assert colab.Colab(None).resources([r]) == {r.endpoint: None}
+        assert isinstance(colab.Colab(None).resources(r), requests.HTTPError)
 
 
 def test_an_untracked_stop_unassigns_that_runtimes_endpoint():
@@ -134,3 +138,65 @@ def test_the_cli_library_never_logs_below_warning_or_to_its_log_file(monkeypatch
         assert logger.getEffectiveLevel() == logging.WARNING
         handlers = logger.handlers + logging.getLogger().handlers
         assert not [h for h in handlers if str(getattr(h, "baseFilename", "")).endswith("colab.log")]
+
+
+def dribble(handler):
+    """A reply that starts at once and trickles 4 bytes every 0.3 s: each socket wait is short, the whole is not."""
+    body = (FIXTURES / "resources_g4.txt").read_bytes()[:40]
+    handler.send_response(200)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    for i in range(0, len(body), 4):
+        handler.wfile.write(body[i : i + 4])
+        handler.wfile.flush()
+        time.sleep(0.3)
+
+
+def dribble_chunked(handler):
+    handler.protocol_version = "HTTP/1.1"
+    handler.send_response(200)
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.end_headers()
+    for _ in range(10):
+        handler.wfile.write(b"4\r\n    \r\n")
+        handler.wfile.flush()
+        time.sleep(0.3)
+    handler.wfile.write(b"0\r\n\r\n")
+
+
+def stall_after_headers(handler):
+    handler.send_response(200)
+    handler.send_header("Content-Length", "100")
+    handler.end_headers()
+    handler.wfile.flush()
+    time.sleep(3)
+
+
+def say_nothing(handler):
+    time.sleep(3)
+
+
+@pytest.mark.parametrize("reply", [dribble, dribble_chunked, stall_after_headers, say_nothing])
+def test_a_proxy_read_ends_at_its_deadline_however_the_reply_stalls(reply):
+    """data-sources.md: a read that takes over 3 s is a gap. Here the deadline is 1 s."""
+    from cotop.colab import _proxy_get
+
+    class Proxy(BaseHTTPRequestHandler):
+        def do_GET(self):
+            try:
+                reply(self)
+            except OSError:  # the client hung up at its deadline
+                pass
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(Exception):
+            _proxy_get(f"http://127.0.0.1:{server.server_port}", "t", "/api/colab/resources", 1)
+        assert time.monotonic() - started < 2  # the deadline, plus at most one socket wait
+    finally:
+        server.shutdown()

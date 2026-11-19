@@ -89,7 +89,6 @@ class Gpu:
 class Resources:
     """One reading of a runtime's memory, disk and GPUs; cotop takes one every two seconds."""
 
-    at: datetime
     memory_total: int
     memory_free: int
     disk_total: int
@@ -97,13 +96,12 @@ class Resources:
     gpus: tuple[Gpu, ...]
 
     @classmethod
-    def parse(cls, at: datetime, resources: dict) -> Resources:
+    def parse(cls, resources: dict) -> Resources:
         """Sizes are optional and default to 0, as in Colab's own client (colab-vscode);
         a missing utilization stays None, so it draws as a gap rather than an idle GPU."""
         memory = resources.get("memory", {})
         disks = [d.get("filesystem", {}) for d in resources.get("disks", [])]
         return cls(
-            at=at,
             memory_total=memory.get("totalBytes", 0),
             memory_free=memory.get("freeBytes", 0),
             disk_total=sum(d.get("totalBytes", 0) for d in disks),
@@ -135,25 +133,40 @@ class Resources:
 
 
 class Samples:
-    """Recent resource readings per runtime. A failed reading is a gap (None), never a zero."""
+    """Recent resource readings per runtime. A failed read is a gap, kept as the error that made it, never a zero.
+
+    Each entry's time is when the reading reached the dashboard, so entries are in order.
+    """
 
     KEEP = 900  # 30 minutes at one reading every two seconds
+    FRESH = timedelta(seconds=10)  # five ticks: a late read or two keeps the meters, a dead endpoint is named within 10 s
 
     def __init__(self):
-        self.readings: dict[str, deque[tuple[datetime, Resources | None]]] = {}
+        self.readings: dict[str, deque[tuple[datetime, Resources | Exception]]] = {}
 
-    def add(self, endpoint: str, at: datetime, reading: Resources | None) -> None:
+    def add(self, endpoint: str, at: datetime, reading: Resources | Exception) -> None:
         self.readings.setdefault(endpoint, deque(maxlen=self.KEEP)).append((at, reading))
 
-    def latest(self, endpoint: str) -> Resources | None:
-        for _, reading in reversed(self.readings.get(endpoint, ())):
-            if reading is not None:
+    def latest(self, endpoint: str, now: datetime) -> Resources | None:
+        """The newest reading, if it is under FRESH old: an older one is what the runtime was doing, not what it does."""
+        for at, reading in reversed(self.readings.get(endpoint, ())):
+            if now - at > self.FRESH:
+                return None
+            if isinstance(reading, Resources):
                 return reading
         return None
 
+    def failure(self, endpoint: str, now: datetime) -> Exception | None:
+        """Why there is no fresh reading, once reads have failed for FRESH; None while one is fresh or it is too soon to say."""
+        readings = self.readings.get(endpoint)
+        if not readings or now - readings[0][0] < self.FRESH or self.latest(endpoint, now) is not None:
+            return None
+        newest = readings[-1][1]
+        return newest if isinstance(newest, Exception) else None
+
     def series(self, endpoint: str, metric) -> list[float | None]:
         """metric(reading) for each reading, oldest first; gaps, and readings it has no value for, are None."""
-        return [metric(r) if r is not None else None for _, r in self.readings.get(endpoint, ())]
+        return [metric(r) if isinstance(r, Resources) else None for _, r in self.readings.get(endpoint, ())]
 
     def time_of(self, endpoint: str, n: int) -> datetime | None:
         """When the n-th newest reading was taken, or the oldest if there are fewer."""

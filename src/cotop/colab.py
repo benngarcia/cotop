@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -23,7 +24,7 @@ COLAB = "https://colab.research.google.com"
 USERINFO = "https://openidconnect.googleapis.com/v1/userinfo"
 HEADERS = {"Accept": "application/json", "X-Colab-Client-Agent": "colab-cli"}
 TIMEOUT = 15
-RESOURCES_TIMEOUT = 3  # readings come every 2 s; one later than that is a gap
+RESOURCES_TIMEOUT = 3  # readings come every 2 s; one that takes longer than this is a gap
 CLI_HOME = Path("~/.config/colab-cli").expanduser()
 SESSIONS = CLI_HOME / "sessions.json"
 
@@ -88,11 +89,12 @@ class Colab:
             results = pool.map(_runtime_status, assignments)
             return {a["endpoint"]: s for a, s in zip(assignments, results)}
 
-    def resources(self, runtimes: list[Runtime]) -> dict[str, Resources | None]:
-        """One reading per runtime; a failed read is None, a gap in the graph."""
-        with ThreadPoolExecutor(max_workers=8) as pool:
-            results = pool.map(_runtime_resources, runtimes)
-            return {r.endpoint: res for r, res in zip(runtimes, results)}
+    def resources(self, runtime: Runtime) -> Resources | Exception:
+        """One reading of one runtime; a failed or late read is its error, a gap in the graph."""
+        try:
+            return Resources.parse(_proxy_get(runtime.url, runtime.token, "/api/colab/resources", RESOURCES_TIMEOUT))
+        except Exception as e:  # shown once reads have failed for a while, never swallowed
+            return e
 
 
 class RuntimeGone(Exception):
@@ -116,15 +118,29 @@ def _cli(command: Command, name: str) -> str:
 
 
 def _proxy_get(url: str, token: str, path: str, timeout: float):
+    """GET a path on a runtime's proxy, all of it within timeout seconds.
+
+    requests applies a timeout to each socket wait, so a proxy that trickles
+    its reply never trips it; the body is read a chunk at a time against a
+    deadline instead, and a reply that misses it raises.
+    """
+    deadline = time.monotonic() + timeout
     headers = {**HEADERS, "X-Colab-Runtime-Proxy-Token": token}
     # Jupyter Server skips activity tracking for this parameter; whether Colab's
     # idle shutdown looks at it is not documented.
     # The token is for this runtime's proxy only, so a redirect is an error, never followed.
-    r = requests.get(url.rstrip("/") + path, headers=headers, params={"no_track_activity": "1"}, timeout=timeout, allow_redirects=False)
-    if r.is_redirect:
-        raise requests.HTTPError(f"runtime proxy redirected to {r.headers.get('Location', '?')}", response=r)
-    r.raise_for_status()
-    return parse_json(r.text)
+    with requests.get(
+        url.rstrip("/") + path, headers=headers, params={"no_track_activity": "1"}, timeout=timeout, allow_redirects=False, stream=True
+    ) as r:
+        if r.is_redirect:
+            raise requests.HTTPError(f"runtime proxy redirected to {r.headers.get('Location', '?')}", response=r)
+        r.raise_for_status()
+        body = bytearray()
+        while time.monotonic() < deadline and (chunk := r.raw.read1(decode_content=True)):
+            body += chunk
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"no full reply from the runtime in {timeout:g} s")
+    return parse_json(body.decode())
 
 
 def _runtime_status(assignment: dict) -> Status | Exception:
@@ -136,10 +152,3 @@ def _runtime_status(assignment: dict) -> Status | Exception:
         )
     except Exception as e:  # shown in the runtime's row, never swallowed
         return e
-
-
-def _runtime_resources(runtime: Runtime) -> Resources | None:
-    try:
-        return Resources.parse(utc_now(), _proxy_get(runtime.url, runtime.token, "/api/colab/resources", RESOURCES_TIMEOUT))
-    except Exception:  # a gap in the graph; the slow loop reports an unreachable runtime
-        return None

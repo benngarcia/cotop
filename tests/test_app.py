@@ -1,6 +1,8 @@
 """The dashboard rendered from fixture payloads, with no network and temp state dirs."""
 
 import json
+import threading
+import time
 from datetime import timedelta
 
 import pytest
@@ -41,8 +43,8 @@ class StubColab:
     def status(self, assignments):
         return self._status
 
-    def resources(self, runtimes):
-        return {r.endpoint: self._readings.get(r.endpoint) for r in runtimes}
+    def resources(self, runtime):
+        return self._readings.get(runtime.endpoint, ConnectionError("proxy said 502"))
 
     def stop(self, runtime):
         self.calls.append(("stop", runtime.endpoint))
@@ -298,8 +300,78 @@ async def test_a_failed_reading_is_kept_as_a_gap(isolated):
     async with app.run_test(size=(150, 46)) as pilot:
         await settle(app, pilot)
         app.add_readings(utc_now(), {G4["endpoint"]: resources(0.5)})
-        app.add_readings(utc_now(), {G4["endpoint"]: None})
+        app.add_readings(utc_now(), {G4["endpoint"]: ConnectionError("proxy said 502")})
         assert app.samples.series(G4["endpoint"], lambda r: r.gpu_utilization)[-2:] == [0.5, None]
+
+
+def cells(table, row):
+    return {column: str(value) for column, value in zip(table.columns, table.get_row_at(row))}
+
+
+async def test_an_old_reading_is_not_shown_as_now_and_idle_billing_still_warns(isolated):
+    """Reads that keep failing leave no GPU % on screen, and say why, so an idle VM still warns it is billing."""
+    colab = StubColab([G4], {G4["endpoint"]: status("idle", "2026-11-17T21:00:00Z")}, {}, rate=10.05)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        start = utc_now() - timedelta(minutes=29)
+        app.add_readings(start, {G4["endpoint"]: resources(0.97)})  # the last read that worked
+        for i in range(1, 870):
+            app.add_readings(start + timedelta(seconds=2 * i), {G4["endpoint"]: ConnectionError("proxy said 502")})
+        await pilot.press("r")
+        await settle(app, pilot)
+        row = cells(app.query_one(Runtimes), 0)
+        assert row["GPU"].endswith("–") and row["State"].startswith("idle")
+        panel = app.query_one(RuntimePanel)
+        assert str(panel.query_one(".plot-label").render()).startswith("–")
+        assert "still billing" in str(panel.query_one(".facts").render())
+        assert "ConnectionError: proxy said 502" in str(panel.query_one(".meters").render())
+
+
+async def test_a_cpu_runtime_keeps_its_ram_graph_when_its_reading_goes_stale(isolated):
+    colab = StubColab([CPU], {CPU["endpoint"]: status()}, {}, rate=0.07)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.add_readings(utc_now() - timedelta(minutes=1), {CPU["endpoint"]: resources(None)})
+        await pilot.press("r")
+        await settle(app, pilot)
+        assert str(app.query_one(RuntimePanel).query_one(".plot-label").render()) == "–  RAM"
+
+
+async def test_one_slow_runtime_holds_back_only_its_own_readings(isolated, monkeypatch):
+    """Each tick leaves one entry per runtime: a reading, or a gap while the last read is still out."""
+    monkeypatch.setattr("cotop.app.SAMPLE_SECONDS", 0.1)
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    colab.resources = lambda r: time.sleep(0.35) or resources(0.5) if r.endpoint == T4["endpoint"] else resources(1.0)
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.pause(1.5)
+        fast, slow = (list(app.samples.readings[a["endpoint"]]) for a in (G4, T4))
+    assert len(fast) >= 8 and all(r.gpu_utilization == 1.0 for _, r in fast)
+    assert abs(len(fast) - len(slow)) <= 1
+    assert {type(r).__name__ for _, r in slow} == {"Resources", "TimeoutError"}
+    times = [at for at, _ in slow]
+    assert times == sorted(times)
+
+
+async def test_a_read_that_lands_after_its_runtime_is_gone_is_dropped(isolated):
+    colab = StubColab([G4, T4], {G4["endpoint"]: status(), T4["endpoint"]: status()}, {}, rate=11.89)
+    gate, started = threading.Event(), threading.Event()
+    colab.resources = lambda r: (started.set(), gate.wait(5), resources(0.5))[-1]
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        app.action_sample()
+        started.wait(5)
+        colab._assignments, colab._status = [G4], {G4["endpoint"]: status()}  # T4 stopped elsewhere
+        await pilot.press("r")
+        await settle(app, pilot)
+        gate.set()
+        while app.reads_out:
+            await pilot.pause(0.05)
+        assert T4["endpoint"] not in app.samples.readings and G4["endpoint"] in app.samples.readings
 
 
 async def test_selection_survives_the_runtime_list_changing(isolated):
@@ -329,7 +401,7 @@ async def test_readings_arriving_while_the_selection_moves(isolated):
         await settle(app, pilot)
         for step in range(6):
             await pilot.press("down" if step % 2 == 0 else "up")
-            app.add_readings(utc_now(), {G4["endpoint"]: resources(0.3), T4["endpoint"]: None})
+            app.add_readings(utc_now(), {G4["endpoint"]: resources(0.3), T4["endpoint"]: ConnectionError("proxy said 502")})
             await pilot.pause()
         assert app.is_running
 

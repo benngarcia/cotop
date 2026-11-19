@@ -73,7 +73,9 @@ def utilization(m: Machine, i: int, rng: random.Random) -> float:
             return 0.0
 
 
-def reading(m: Machine, i: int, at: datetime) -> Resources:
+def reading(m: Machine, i: int) -> Resources | Exception:
+    if m.unreachable:
+        return ConnectionError("runtime proxy returned 502")
     rng = random.Random(f"{m.endpoint}:{i}")
     u = utilization(m, i, rng)
     gpus = ()
@@ -81,7 +83,6 @@ def reading(m: Machine, i: int, at: datetime) -> Resources:
     if m.gpu:
         gpus = (Gpu(m.gpu, u, int(m.vram_total * (0.15 + 0.78 * (u > 0.05)) * GB), int(m.vram_total * GB)),)
     return Resources(
-        at=at,
         memory_total=int(m.ram_total * GB),
         memory_free=int((m.ram_total - ram_used) * GB),
         disk_total=235 * GB,
@@ -136,21 +137,14 @@ class DemoColab:
             out[m.endpoint] = Status(started=now - m.started_ago, kernels=(Kernel(state, last, 1),))
         return out
 
-    def resources(self, runtimes: list[Runtime]) -> dict[str, Resources | None]:
-        now = utc_now()
-        i = HISTORY + int((now - self.start) / STEP)
-        return {
-            r.endpoint: None if self.machines[r.endpoint].unreachable else reading(self.machines[r.endpoint], i, now)
-            for r in runtimes
-            if r.endpoint in self.machines
-        }
+    def resources(self, runtime: Runtime) -> Resources | Exception:
+        if runtime.endpoint not in self.machines:
+            return ConnectionError("runtime stopped")
+        return reading(self.machines[runtime.endpoint], HISTORY + int((utc_now() - self.start) / STEP))
 
-    def backfill(self) -> dict[str, list[Resources | None]]:
+    def backfill(self) -> dict[str, list[Resources | Exception]]:
         """Readings for the last HISTORY steps, so graphs open full instead of empty."""
-        return {
-            m.endpoint: [None if m.unreachable else reading(m, i, self.start - STEP * (HISTORY - i)) for i in range(HISTORY)]
-            for m in self.machines.values()
-        }
+        return {m.endpoint: [reading(m, i) for i in range(HISTORY)] for m in self.machines.values()}
 
     def sessions(self) -> dict[str, dict]:
         return {m.name: {"name": m.name, "endpoint": m.endpoint, "running": m.running} for m in self.machines.values() if m.name}
