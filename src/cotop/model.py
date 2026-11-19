@@ -15,6 +15,7 @@ import tempfile
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from enum import Enum
 from pathlib import Path
 
 XSSI_PREFIX = ")]}'\n"
@@ -342,14 +343,23 @@ class Runtime:
         return found
 
 
+class Basis(Enum):
+    """Where a runtime's hourly rate comes from; Colab reports only the account's total."""
+
+    REPORTED = "reported"  # the account's total, and this runtime is the only one
+    SPLIT = "split"  # the total over runtimes all of one kind
+    LEARNED = "learned"  # what this kind cost when it last ran alone
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class Rate:
     hourly: float | None
-    basis: str  # reported | split | learned | unknown
+    basis: Basis
 
     @property
     def exact(self) -> bool:
-        return self.basis == "reported"
+        return self.basis is Basis.REPORTED
 
 
 class RateBook:
@@ -369,26 +379,24 @@ class RateBook:
             case _:
                 self.rates = {}
 
-    def observe(self, account: Account, runtimes: list[Runtime]) -> None:
-        kinds = {r.kind for r in runtimes}
-        if len(kinds) != 1 or account.rate_hourly <= 0:
+    def observe(self, s: Snapshot) -> None:
+        kinds = {r.kind for r in s.runtimes}
+        if len(kinds) != 1 or s.account.rate_hourly <= 0 or not s.consistent:
             return
-        if account.assignments_count != len(runtimes):  # the two reads straddled a start or stop
-            return
-        rate = round(account.rate_hourly / len(runtimes), 4)
+        rate = round(s.account.rate_hourly / len(s.runtimes), 4)
         kind = kinds.pop()
         if self.rates.get(kind) != rate or self.unsaved:  # retried until the disk takes it
             self.rates[kind] = rate
             self.unsaved = write_atomic(self.path, json.dumps(self.rates, indent=2, sort_keys=True))
 
-    def rate(self, runtime: Runtime, runtimes: list[Runtime], account: Account) -> Rate:
-        if len(runtimes) == 1:
-            return Rate(account.rate_hourly, "reported")
-        if len({r.kind for r in runtimes}) == 1:
-            return Rate(account.rate_hourly / len(runtimes), "split")
+    def rate(self, runtime: Runtime, s: Snapshot) -> Rate:
+        if len(s.runtimes) == 1:
+            return Rate(s.account.rate_hourly, Basis.REPORTED)
+        if len({r.kind for r in s.runtimes}) == 1:
+            return Rate(s.account.rate_hourly / len(s.runtimes), Basis.SPLIT)
         if runtime.kind in self.rates:
-            return Rate(self.rates[runtime.kind], "learned")
-        return Rate(None, "unknown")
+            return Rate(self.rates[runtime.kind], Basis.LEARNED)
+        return Rate(None, Basis.UNKNOWN)
 
 
 class UsageLog:
@@ -547,6 +555,21 @@ class History:
                         sessions.append(created.session(name, None))
                     created = e
         return sorted(sessions, key=lambda s: s.created, reverse=True)
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """The account and its runtimes as one poll read them, a request apart."""
+
+    taken_at: datetime
+    account: Account
+    runtimes: list[Runtime]
+    history: History
+
+    @property
+    def consistent(self) -> bool:
+        """Whether the account's figures cover the runtimes listed: a start or stop between the reads breaks this."""
+        return self.account.assignments_count == len(self.runtimes)
 
 
 def _event(line: str) -> Event | Created | Terminated | None:

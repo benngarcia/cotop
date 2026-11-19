@@ -9,9 +9,11 @@ import pytest
 from cotop.model import (
     Account,
     History,
+    Basis,
     RateBook,
     Resources,
     Samples,
+    Snapshot,
     Status,
     UsageLog,
     parse_json,
@@ -21,6 +23,12 @@ from cotop.model import (
 
 NOW = datetime(2026, 11, 17, 22, 0, tzinfo=timezone.utc)
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def snapshot(runtimes, rate, count=None):
+    """What one poll read: the account's rate and count, then the runtime list."""
+    count = len(runtimes) if count is None else count
+    return Snapshot(NOW, Account.parse("me@example.com", ccu(rate, count)), runtimes, History({}))
 
 
 def ccu(rate, count):
@@ -103,37 +111,34 @@ def test_account_reads_eligible_hardware_and_runway():
 
 
 def test_single_runtime_gets_the_reported_account_rate(tmp_path):
-    a = Account.parse("me@example.com", ccu(10.05, 1))
     [r] = runtimes = runtimes_from([G4], LOCAL, {G4["endpoint"]: status()})
     assert (r.name, r.hardware, r.shape, r.running, r.token) == ("train", "G4", "STANDARD", "run(train.py)", "t")
-    rate = RateBook(tmp_path / "r.json").rate(r, runtimes, a)
-    assert (rate.hourly, rate.basis) == (10.05, "reported")
+    rate = RateBook(tmp_path / "r.json").rate(r, snapshot(runtimes, 10.05))
+    assert (rate.hourly, rate.basis) == (10.05, Basis.REPORTED)
     assert "token=" not in repr(r)  # the proxy token never reaches a log line or the screen
 
 
 def test_mixed_hardware_does_not_give_every_row_the_account_total(tmp_path):
-    a = Account.parse("me@example.com", ccu(11.89, 2))
-    runtimes = runtimes_from([G4, T4], LOCAL, {})
+    s = snapshot(runtimes_from([G4, T4], LOCAL, {}), 11.89)
     book = RateBook(tmp_path / "r.json")
-    assert [book.rate(r, runtimes, a).basis for r in runtimes] == ["unknown", "unknown"]
+    assert [book.rate(r, s).basis for r in s.runtimes] == [Basis.UNKNOWN, Basis.UNKNOWN]
 
-    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
-    book.observe(Account.parse("me@example.com", ccu(3.68, 2)), runtimes_from([T4, T4], {}, {}))
-    assert [book.rate(r, runtimes, a).hourly for r in runtimes] == [10.05, 1.84]
+    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 10.05))
+    book.observe(snapshot(runtimes_from([T4, T4], {}, {}), 3.68))
+    assert [book.rate(r, s).hourly for r in s.runtimes] == [10.05, 1.84]
     assert RateBook(tmp_path / "r.json").rates == {"G4/STANDARD": 10.05, "T4/STANDARD": 1.84}
 
 
 def test_rate_book_learns_nothing_from_a_mixed_set(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    book.observe(Account.parse("me@example.com", ccu(11.89, 2)), runtimes_from([G4, T4], LOCAL, {}))
+    book.observe(snapshot(runtimes_from([G4, T4], LOCAL, {}), 11.89))
     assert book.rates == {}
 
 
 def test_same_kind_runtimes_split_the_total(tmp_path):
-    a = Account.parse("me@example.com", ccu(3.68, 2))
-    runtimes = runtimes_from([T4, assignment("gpu-t4-s-def", "T4")], {}, {})
-    rate = RateBook(tmp_path / "r.json").rate(runtimes[0], runtimes, a)
-    assert (rate.hourly, rate.basis) == (1.84, "split")
+    s = snapshot(runtimes_from([T4, assignment("gpu-t4-s-def", "T4")], {}, {}), 3.68)
+    rate = RateBook(tmp_path / "r.json").rate(s.runtimes[0], s)
+    assert (rate.hourly, rate.basis) == (1.84, Basis.SPLIT)
 
 
 def test_untracked_and_unreachable_runtimes():
@@ -253,8 +258,8 @@ def test_billing_starts_at_assignment_not_vm_boot(tmp_path):
 
 def test_rate_book_skips_reads_that_straddle_a_start_or_stop(tmp_path):
     book = RateBook(tmp_path / "r.json")
-    book.observe(Account.parse("me@example.com", ccu(11.89, 2)), runtimes_from([G4], LOCAL, {}))
-    book.observe(Account.parse("me@example.com", ccu(0, 1)), runtimes_from([G4], LOCAL, {}))
+    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 11.89, count=2))
+    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 0, count=1))
     assert book.rates == {}
 
 
@@ -337,10 +342,10 @@ def test_a_failed_cache_write_is_kept_not_raised_and_leaves_no_temp_file(tmp_pat
 
     book = RateBook(tmp_path / "cache" / "r.json")
     (tmp_path / "cache" / "r.json").mkdir()
-    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 10.05))
     assert isinstance(book.unsaved, OSError)
     (tmp_path / "cache" / "r.json").rmdir()
-    book.observe(Account.parse("me@example.com", ccu(10.05, 1)), runtimes_from([G4], LOCAL, {}))
+    book.observe(snapshot(runtimes_from([G4], LOCAL, {}), 10.05))
     assert book.unsaved is None and RateBook(tmp_path / "cache" / "r.json").rates == {"G4/STANDARD": 10.05}
 
 

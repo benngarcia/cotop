@@ -12,13 +12,13 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 import cotop.colab
-from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, Snapshot, account_text, meters, state_text
+from cotop.app import Dashboard, HistoryScreen, RuntimePanel, Runtimes, account_text, meters, state_text
 from cotop.colab import Colab
 from rich.color import Color as RichColor
 from rich.style import Style
 
 from cotop.widgets import RED, sparkline
-from cotop.model import Account, History, PastSession, RateBook, Resources, Status, parse_json, runtimes_from, utc_now
+from cotop.model import Account, History, PastSession, RateBook, Resources, Snapshot, Status, parse_json, runtimes_from, utc_now
 from tests.test_model import CPU, FIXTURES, G4, LOCAL, NOW, SECRET_HISTORY, T4, assignment, ccu, resources, status
 
 

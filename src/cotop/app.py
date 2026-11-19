@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -28,6 +27,7 @@ from cotop.model import (
     Resources,
     Runtime,
     Samples,
+    Snapshot,
     UsageLog,
     fmt_duration,
     runtimes_from,
@@ -55,14 +55,6 @@ THEME = Theme(
     panel="#1B2028",
     dark=True,
 )
-
-
-@dataclass(frozen=True)
-class Snapshot:
-    taken_at: datetime
-    account: Account
-    runtimes: list[Runtime]
-    history: History
 
 
 def gb(n: int) -> str:
@@ -143,7 +135,7 @@ class RuntimePanel(Vertical):
         self.border_subtitle = state_text(r, now, latest).plain + (f"  {r.running}" if r.running else "")
         self.show_readings(r)
 
-        rate = rates.rate(r, s.runtimes, s.account)
+        rate = rates.rate(r, s)
         billed = r.billed_for(now)
         lines = []
         if r.error:
@@ -245,7 +237,7 @@ class Runtimes(DataTable):
             self.remove_column("Up")
 
     def show(self, s: Snapshot, rates: RateBook, samples: Samples) -> None:
-        rate_of = {r.endpoint: rates.rate(r, s.runtimes, s.account) for r in s.runtimes}
+        rate_of = {r.endpoint: rates.rate(r, s) for r in s.runtimes}
         ordered = sorted(s.runtimes, key=lambda r: (rate_of[r.endpoint].hourly is None, -(rate_of[r.endpoint].hourly or 0), r.label))
         keys = [r.endpoint for r in ordered]
         if [row.value for row in self.rows] != keys:
@@ -491,7 +483,7 @@ class Dashboard(App):
     def show(self, s: Snapshot) -> None:
         self.snapshot = s
         self.usage.record(s.taken_at, s.account.balance, s.account.rate_hourly)
-        self.rates.observe(s.account, s.runtimes)
+        self.rates.observe(s)
         self.samples.keep_only({r.endpoint for r in s.runtimes})
         self.query_one(Usage).show(s, self.usage)
         # The table stays visible when empty: hiding a focused widget blurs it, and
