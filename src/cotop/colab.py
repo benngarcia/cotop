@@ -143,8 +143,6 @@ def _runtime_status(assignment: dict) -> Status | Exception:
 
 
 def _runtime_resources(runtime: Runtime) -> Resources | None:
-    if runtime.url is None:  # nothing to read until Colab gives it a proxy
-        return None
     try:
         return Resources.parse(utc_now(), _proxy_get(runtime.url, runtime.token, "/api/colab/resources", RESOURCES_TIMEOUT))
     except Exception:  # a gap in the graph; the slow loop reports an unreachable runtime

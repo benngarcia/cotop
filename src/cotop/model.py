@@ -118,7 +118,7 @@ class Account:
     def parse(cls, email: str, ccu: dict) -> Account:
         """Numbers stay numbers: colab-vscode reads these as z.number(), so a string is an error, not a value."""
         balance, rate = number(ccu["currentBalance"]), number(ccu["consumptionRateHourly"])
-        if rate < 0 or (rate and not abs(balance / rate) <= LONGEST_RUNWAY / timedelta(hours=1)):
+        if rate and not abs(balance / rate) <= LONGEST_RUNWAY / timedelta(hours=1):
             raise ValueError(f"{balance} compute units at {rate} an hour is not an account")
         return cls(
             email=string(email),

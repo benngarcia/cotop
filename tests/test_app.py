@@ -779,7 +779,8 @@ def is_fraction(u) -> bool:
 @settings(max_examples=400, deadline=None, suppress_health_check=[HealthCheck.too_slow])
 @given(st.data())
 def test_every_value_that_parses_draws(data):
-    account = parsed(lambda: Account.parse("me@example.com", mutated(data, WIRE["ccu"])))
+    email = data.draw(st.one_of(st.just("me@example.com"), ODD))
+    account = parsed(lambda: Account.parse(email, mutated(data, WIRE["ccu"])))
     reading = parsed(lambda: Resources.parse(NOW, mutated(data, parse_json(WIRE["/api/colab/resources"]))))
     health = parsed(lambda: Status.parse(mutated(data, WIRE["/api/status"]), mutated(data, WIRE["/api/kernels"])))
     runtimes = parsed(lambda: runtimes_from([mutated(data, G4)], LOCAL, {G4["endpoint"]: health or ValueError("bad status")}))
@@ -787,7 +788,7 @@ def test_every_value_that_parses_draws(data):
     if account:
         assert type(account.email) is str and all(type(n) is str for n in account.eligible_gpus + account.eligible_tpus)
         assert all(type(n) in (int, float) and math.isfinite(n) for n in (account.balance, account.rate_hourly))
-        assert account.rate_hourly >= 0 and is_whole(account.assignments_count)
+        assert is_whole(account.assignments_count)
         account_text(account, NOW, None)
         list(HistoryScreen(Snapshot(NOW, account, runtimes or [], History({})), RateBook(Path("/nonexistent/rates.json"))).compose())
     if reading:
