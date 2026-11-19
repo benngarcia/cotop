@@ -88,4 +88,10 @@ The CLI resolves names, not endpoints. Before a named action, cotop reads
 the assignments and the session file again. It acts only if the name still
 points at the same live VM. A name that was reused since the last poll would
 otherwise point at another VM. `colab ssh` also creates a new runtime for a
-name it does not know.
+name it does not know. For `x`, the check and the shell run in one step on
+the dashboard's event loop, so no other key or refresh runs between them; the
+dashboard stays frozen while the check reads the assignments.
+
+A runtime takes one action at a time. From the `y` that confirms a stop or a
+kernel restart until that command returns, `s`, `R` and `x` on that runtime
+show a warning and do nothing.

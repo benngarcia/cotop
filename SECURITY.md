@@ -29,7 +29,7 @@ cotop signs in with the Colab CLI's own credentials, so it can do anything `cola
 
 Each line is true of this release and names the test on `main` that checks it:
 
-- Before it stops, restarts or opens a shell on a named runtime, cotop checks that the name still points at the runtime you selected (`test_every_named_action_checks_the_name_still_means_this_runtime`).
+- Before it stops, restarts or opens a shell on a named runtime, cotop checks that the name still points at the runtime you selected; for a shell, immediately before it opens (`test_every_named_action_checks_the_name_still_means_this_runtime`, `test_a_second_x_checks_the_name_right_before_its_own_shell`).
 - No module in `src/cotop` other than `colab_cli_calls.py` has an import statement for `google-colab-cli`, or writes `_session` (the attribute that holds the signed-in session) as an attribute or a string literal (`test_only_the_handoff_module_imports_colab_cli_or_touches_the_session`).
 - A runtime's proxy token never follows a redirect (`test_the_proxy_token_never_follows_a_redirect`).
 - From the CLI's history, cotop never shows code, outputs or prompt replies, and drops them as it reads each line, so a crash report can't print them either (`test_history_never_surfaces_code_outputs_or_stdin`, `test_the_activity_panel_shows_history_without_code`, `test_a_crash_report_never_shows_cli_history`).

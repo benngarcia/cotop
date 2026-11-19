@@ -426,6 +426,8 @@ async def test_the_demo_runs_and_sorts_the_most_expensive_first(tmp_path):
         assert table.row_count == 12 and table.border_title == "Runtimes (12)"
         rates = [float(str(table.get_row_at(i)[3]).lstrip("≈")) for i in range(table.row_count)]
         assert rates == sorted(rates, reverse=True)
+        axis = str(app.query_one(RuntimePanel).query_one("TimeAxis").render())
+        assert "m ago" in axis and axis.endswith("now")  # the selected runtime's oldest visible reading
         assert "Up" in table.columns
         await pilot.resize_terminal(80, 24)
         await settle(app, pilot)
@@ -567,6 +569,115 @@ def test_the_demo_signs_in_to_nothing_and_leaves_the_cache_alone(tmp_path, monke
     [app] = used
     assert home_cache not in (app.rates.path.parent, app.usage.path.parent)
     assert not (tmp_path / "home").exists()
+
+
+async def test_a_second_x_checks_the_name_right_before_its_own_shell(isolated, monkeypatch):
+    """SECURITY.md: x pressed twice must not open the second shell on a check made before the first one closed."""
+    import contextlib
+    import time
+
+    import cotop.app
+    from cotop.colab import RuntimeGone, still_assigned
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    reused = assignment("gpu-g4-s-reused", "G4")
+
+    def ssh_command(runtime):
+        time.sleep(0.3)  # the check reads the assignments from Colab
+        if not still_assigned(runtime, colab.assignments(), colab.sessions()):
+            raise RuntimeGone(f"{runtime.name} is no longer this runtime; refresh and retry")
+        return ["colab", "ssh", "-s", runtime.name]
+
+    shells = []
+
+    def shell(argv, **kwargs):
+        shells.append(colab.local["train"]["endpoint"])  # the VM the name means as the shell opens
+        time.sleep(0.6)  # the shell is open
+        colab._assignments = [reused]  # meanwhile train is stopped and its name reused
+        colab.local = {"train": {"name": "train", "endpoint": reused["endpoint"], "running": None}}
+        colab.fail = True  # and the refresh after the shell has not landed when the next x is read
+        return type("Done", (), {"returncode": 0})()
+
+    colab.ssh_command = ssh_command
+    monkeypatch.setattr(cotop.app.subprocess, "run", shell)
+    app = Dashboard(colab, isolated)
+    monkeypatch.setattr(app, "suspend", contextlib.nullcontext)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("x")
+        await pilot.pause(0.05)
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert shells == [G4["endpoint"]]
+        assert any("train is no longer this runtime" in str(n.message) for n in app._notifications)
+
+
+async def test_a_runtime_takes_no_other_action_while_one_is_running(isolated):
+    """s y s y must not send two stops of one VM; R and x wait too. The keys work again once it returns."""
+    import threading
+
+    colab = StubColab([G4], {G4["endpoint"]: status()}, {}, rate=10.05)
+    gate = threading.Event()
+
+    def stop(runtime):
+        colab.calls.append(("stop", runtime.endpoint))
+        if len(colab.calls) == 1:
+            gate.wait(5)  # `colab stop` takes seconds, and the VM stays listed until it returns
+            raise RuntimeError("colab stop failed")
+        return "stopped"
+
+    def ssh_command(runtime):
+        colab.calls.append(("ssh", runtime.endpoint))
+        raise RuntimeError("stubbed: no shell in tests")
+
+    colab.stop, colab.ssh_command = stop, ssh_command
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        await pilot.press("s", "y")
+        await pilot.pause(0.1)
+        await pilot.press("s", "y", "R", "y", "x")
+        await pilot.pause(0.1)
+        assert colab.calls == [("stop", G4["endpoint"])]
+        gate.set()
+        await settle(app, pilot)
+        await pilot.press("s", "y")  # the first stop failed, so stopping again is the user's call
+        await settle(app, pilot)
+        assert colab.calls == [("stop", G4["endpoint"]), ("stop", G4["endpoint"])]
+
+
+async def test_a_vanished_selection_stays_on_its_row_and_x_follows_it(isolated):
+    """The cursor must not jump to row 0, the most expensive VM, where x opens a shell with no prompt."""
+    a100 = assignment("gpu-a100-x", "A100")
+    everyone = [G4, T4, CPU, a100]
+    colab = StubColab(everyone, {a["endpoint"]: status() for a in everyone}, {}, rate=0)
+    colab.local = {
+        name: {"name": name, "endpoint": a["endpoint"], "running": None}
+        for name, a in {"train": G4, "eval": T4, "cpu": CPU, "big": a100}.items()
+    }
+
+    def ssh_command(runtime):
+        colab.calls.append(("ssh", runtime.endpoint))
+        raise RuntimeError("stubbed: no shell in tests")
+
+    colab.ssh_command = ssh_command
+    app = Dashboard(colab, isolated)
+    async with app.run_test(size=(150, 46)) as pilot:
+        await settle(app, pilot)
+        table = app.query_one(Runtimes)
+        rows = lambda: [table.coordinate_to_cell_key((i, 0)).row_key.value for i in range(table.row_count)]
+        await pilot.press("down", "down")
+        await settle(app, pilot)
+        gone = rows()[2]
+        colab._assignments = [a for a in everyone if a["endpoint"] != gone]
+        await pilot.press("r")
+        await settle(app, pilot)
+        after = rows()
+        assert table.cursor_row == 2 and after[2] != after[0]
+        assert app.query_one(RuntimePanel).border_title.startswith(app.selected_runtime().label + " ")
+        await pilot.press("x")
+        await settle(app, pilot)
+        assert colab.calls == [("ssh", after[2])]
 
 
 # Wire data Colab could send, through the real Colab class: only the HTTP edge is faked.
