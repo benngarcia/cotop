@@ -64,4 +64,4 @@ These examples are taken from [google-colab-cli 0.8.0](https://pypi.org/project/
 - `get_credentials()` reads and writes the OS keyring. It moves an old plaintext `~/.config/colab-cli/token.json` into the keyring, and reads `~/.colab-cli-oauth-config.json` if that file exists.
 - The three `colab` commands cotop runs log to `~/.config/colab-cli/colab.log` with secrets redacted, update files under `~/.config/colab-cli/`, and check `pypi.org` for an update at most once a day.
 - `colab ssh` reads your SSH public key.
-- `StateStore(path)`, which cotop builds on every refresh, sets `~/.config/colab-cli/sessions.json` to mode 0600, and `list()` takes a shared lock on `sessions.json.lock`, creating that file if it is missing (`colab_cli/state.py`, `_LockedFileStore`).
+- `StateStore(path)`, which cotop builds on every refresh, sets `~/.config/colab-cli/sessions.json` to mode 0600 and creates `sessions.json.lock` beside it, and `list()` takes a shared lock on that file (`colab_cli/state.py`, `_LockedFileStore`).
