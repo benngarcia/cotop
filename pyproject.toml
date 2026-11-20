@@ -1,6 +1,6 @@
 [project]
 name = "cotop"
-version = "0.3.3"
+version = "0.3.4"
 description = "A top-like terminal dashboard for Google Colab runtimes and compute units"
 readme = "README.md"
 license = "MIT"
